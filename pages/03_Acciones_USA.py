@@ -11,6 +11,8 @@ def load_data():
     try:
         df = pd.read_csv('reporte_trades_para_USA.csv', sep=None, engine='python')
         df.columns = [str(c).strip().lower() for c in df.columns]
+        
+        # Mapeo forzado para evitar errores de nombres
         mapeo = {
             'ticker': 'Ticker', 'inversion_usa': 'Inversion_USA',
             'estado_trade': 'Estado_Trade', 'fecha': 'fecha',
@@ -18,8 +20,17 @@ def load_data():
             'id_trade': 'ID_Trade'
         }
         df = df.rename(columns={k: v for k, v in mapeo.items() if k in df.columns})
+        
+        # Validación de columna fecha
         if 'fecha' in df.columns:
             df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
+        else:
+            # Si el CSV tiene otro nombre, intentamos detectarlo
+            posibles_fechas = [c for c in df.columns if 'fec' in c.lower() or 'dat' in c.lower()]
+            if posibles_fechas:
+                df = df.rename(columns={posibles_fechas[0]: 'fecha'})
+                df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
+        
         return df
     except Exception as e:
         st.error(f"❌ Error al leer el archivo: {e}")
@@ -30,8 +41,11 @@ df_trades = load_data()
 
 if df_trades is not None:
     try:
-        # --- PROCESAMIENTO ---
-        df_cerrados = df_trades[df_trades['Estado_Trade'] == 'Cerrado'].copy()
+        # --- 1. PROCESAMIENTO ROBUSTO ---
+        # Filtramos solo cerrados y nos aseguramos de que tengan fecha válida
+        df_cerrados = df_trades[(df_trades['Estado_Trade'] == 'Cerrado') & (df_trades['fecha'].notnull())].copy()
+
+        # Agregación Nombrada: Aquí evitamos el KeyError definiendo nombres nuevos
         resumen_stats = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg(
             Fecha_In=('fecha', 'min'),
             Fecha_Out=('fecha', 'max'),
@@ -40,118 +54,92 @@ if df_trades is not None:
             Precio_Entrada=('Precio_Unitario', 'first')
         ).reset_index()
 
-        # Cálculos Base
+        # Cálculos de Métricas
         resumen_stats['Resultado_USD'] = resumen_stats['Neto_Flujo']
         resumen_stats['Inversion_Inicial'] = resumen_stats['Cant_Total'] * resumen_stats['Precio_Entrada']
         resumen_stats['Rendimiento_%'] = np.where(resumen_stats['Inversion_Inicial'] > 0, 
                                                 (resumen_stats['Resultado_USD'] / resumen_stats['Inversion_Inicial']) * 100, 0)
-        
-        # Métrica Solicitada: Tamaño del trade relativo a cuenta de 10k
         resumen_stats['Size_vs_10k_%'] = (resumen_stats['Inversion_Inicial'] / 10000) * 100
 
         ganadores = resumen_stats[resumen_stats['Resultado_USD'] > 0].copy()
         perdedores = resumen_stats[resumen_stats['Resultado_USD'] <= 0].copy()
 
-        # --- MÉTRICAS SOLICITADAS (ENCABEZADO) ---
-        # Promedios Ponderados (Weight = Inversión Inicial)
+        # --- 2. MÉTRICAS DEL ENCABEZADO ---
         def ponderado(df):
             if df.empty or df['Inversion_Inicial'].sum() == 0: return 0
             return (df['Rendimiento_%'] * df['Inversion_Inicial']).sum() / df['Inversion_Inicial'].sum()
 
-        w_avg_gain = ponderado(ganadores)
-        w_avg_loss = ponderado(perdedores)
-        avg_size_10k = resumen_stats['Size_vs_10k_%'].mean()
-        profit_factor = ganadores['Resultado_USD'].sum() / abs(perdedores['Resultado_USD'].sum()) if not perdedores.empty else 0
-
         st.subheader("📌 Métricas de Gestión de Riesgo (Benchmark 10k USD)")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Prom. Ponderado Ganancia", f"{w_avg_gain:.2f}%", delta_color="normal")
-        m2.metric("Prom. Ponderado Pérdida", f"{w_avg_loss:.2f}%", delta_color="inverse")
-        m3.metric("Avg Trade Size (s/10k)", f"{avg_size_10k:.2f}%")
-        m4.metric("Profit Factor", f"{profit_factor:.2f}x")
+        m1.metric("Prom. Ponderado Ganancia", f"{ponderado(ganadores):.2f}%")
+        m2.metric("Prom. Ponderado Pérdida", f"{ponderado(perdedores):.2f}%")
+        m3.metric("Avg Trade Size (s/10k)", f"{resumen_stats['Size_vs_10k_%'].mean():.2f}%")
+        m4.metric("Profit Factor", f"{(ganadores['Resultado_USD'].sum() / abs(perdedores['Resultado_USD'].sum())):.2f}x" if not perdedores.empty else "N/A")
 
-        # --- GRÁFICOS (MÁXIMO 4) ---
+        # --- 3. GRÁFICOS (4 LÍMITES) ---
         st.write("---")
-        col_g1, col_g2 = st.columns(2)
-        
-        with col_g1:
-            # Gráfico 1: Distribución P&L
+        c_g1, c_g2 = st.columns(2)
+        with c_g1:
+            # G1: Histograma
             fig1, ax1 = plt.subplots(figsize=(8, 4))
             sns.histplot(resumen_stats['Resultado_USD'], kde=True, color='teal', ax=ax1)
-            ax1.set_title("Frecuencia de Ganancias/Pérdidas")
+            ax1.set_title("Distribución de P&L")
             st.pyplot(fig1)
-            
-            # Gráfico 3: ROI % por Trade (Scatter plot para ver consistencia)
-            fig3, ax3 = plt.subplots(figsize=(8, 4))
-            ax3.scatter(resumen_stats.index, resumen_stats['Rendimiento_%'], 
-                       c=np.where(resumen_stats['Rendimiento_%'] > 0, 'g', 'r'), alpha=0.6)
-            ax3.axhline(0, color='black', lw=1)
-            ax3.set_title("Rendimiento % Individual por Trade")
-            st.pyplot(fig3)
-
-        with col_g2:
-            # Gráfico 2: Win Rate %
-            fig2, ax2 = plt.subplots(figsize=(5, 4))
-            ax2.pie([len(ganadores), len(perdedores)], labels=['Wins', 'Losses'], 
-                    autopct='%1.1f%%', colors=['#2ecc71', '#e74c3c'], startangle=140)
-            ax2.set_title("Efectividad")
+            # G2: Scatter de Consistencia
+            fig2, ax2 = plt.subplots(figsize=(8, 4))
+            ax2.scatter(resumen_stats.index, resumen_stats['Rendimiento_%'], 
+                        c=np.where(resumen_stats['Rendimiento_%'] > 0, 'g', 'r'), alpha=0.5)
+            ax2.axhline(0, color='black', lw=1)
+            ax2.set_title("Consistencia: ROI % por Operación")
             st.pyplot(fig2)
-            
-            # Gráfico 4: Evolución del Capital (Equity Curve Real)
+
+        with c_g2:
+            # G3: Pie Win Rate
+            fig3, ax3 = plt.subplots(figsize=(5, 4))
+            ax3.pie([len(ganadores), len(perdedores)], labels=['Wins', 'Losses'], autopct='%1.1f%%', colors=['#2ecc71', '#e74c3c'])
+            ax3.set_title("Efectividad")
+            st.pyplot(fig3)
+            # G4: Equity Curve
             fig4, ax4 = plt.subplots(figsize=(8, 4))
-            equity_real = 10000 + resumen_stats['Resultado_USD'].cumsum()
-            ax4.plot(equity_real, marker='o', linestyle='-', color='royalblue')
-            ax4.set_title("Curva de Equidad Real (Base 10k)")
+            ax4.plot((10000 + resumen_stats['Resultado_USD'].cumsum()).values, color='royalblue', lw=2)
+            ax4.set_title("Curva de Capital (Base 10k)")
             st.pyplot(fig4)
 
-        # --- SIMULACIÓN MONTE CARLO CON MEDIANA ---
+        # --- 4. MONTE CARLO CON MEDIANA ---
         st.write("---")
-        st.write("### 🎲 Simulación Monte Carlo & Mediana Estadística")
-        
+        st.write("### 🎲 Simulación Monte Carlo & Mediana (P50)")
         n_sim = st.sidebar.slider("Simulaciones", 100, 1000, 500)
-        n_trades_future = st.sidebar.number_input("Trades a proyectar", value=len(resumen_stats))
+        
+        fig_mc, ax_mc = plt.subplots(figsize=(16, 7))
+        rutas = []
+        for _ in range(n_sim):
+            # Bootstrapping: Remuestreo de tus propios resultados reales
+            cambios = np.random.choice(resumen_stats['Resultado_USD'], size=len(resumen_stats), replace=True)
+            ruta = 10000 + np.cumsum(cambios)
+            rutas.append(ruta)
+            ax_mc.plot(ruta, color='gray', alpha=0.03)
+        
+        ax_mc.plot(np.median(rutas, axis=0), color='gold', lw=4, label="Mediana (Camino más probable)")
+        ax_mc.axhline(10000, color='red', ls='--')
+        ax_mc.legend()
+        st.pyplot(fig_mc)
 
-        if not resumen_stats.empty:
-            fig_mc, ax_mc = plt.subplots(figsize=(16, 7))
-            all_paths = []
-            
-            for _ in range(n_sim):
-                draws = np.random.choice(resumen_stats['Resultado_USD'], size=n_trades_future, replace=True)
-                path = 10000 + np.cumsum(draws)
-                all_paths.append(path)
-                ax_mc.plot(path, color='gray', alpha=0.03) # Caminos aleatorios en gris tenue
-
-            # Cálculo de la Mediana (P50)
-            median_path = np.median(all_paths, axis=0)
-            ax_mc.plot(median_path, color='gold', linewidth=3, label="Mediana Estadística (P50)")
-            ax_mc.axhline(10000, color='red', linestyle='--', label="Breakeven")
-            
-            ax_mc.set_title(f"Proyección de {n_trades_future} trades futuros (Basado en tu histórico)")
-            ax_mc.legend()
-            st.pyplot(fig_mc)
-
-        # --- LISTADO DE TRADES DETALLADO ---
+        # --- 5. TABLAS DE TRADES ---
         st.write("---")
-        st.write("### 📜 Detalle de Operaciones Cerradas")
+        st.subheader("📜 Detalle de Operaciones")
         
-        # Formateo de fechas y redondeo solicitado
-        resumen_stats['Fecha_In'] = pd.to_datetime(resumen_stats['Fecha_In']).dt.date
-        resumen_stats['Fecha_Out'] = pd.to_datetime(resumen_stats['Fecha_Out']).dt.date
-        resumen_stats['Cant_Total'] = resumen_stats['Cant_Total'].round(4)
+        # Formateo visual
+        resumen_stats['Fecha_In'] = resumen_stats['Fecha_In'].dt.date
+        resumen_stats['Fecha_Out'] = resumen_stats['Fecha_Out'].dt.date
         
-        cols_finales = ['Ticker', 'Fecha_In', 'Fecha_Out', 'Cant_Total', 'Precio_Entrada', 'Inversion_Inicial', 'Size_vs_10k_%', 'Resultado_USD', 'Rendimiento_%']
+        fmt = {'Inversion_Inicial': '${:,.2f}', 'Resultado_USD': '${:,.2f}', 
+               'Rendimiento_%': '{:.2f}%', 'Size_vs_10k_%': '{:.2f}%',
+               'Cant_Total': '{:.4f}'}
         
-        tab1, tab2 = st.tabs(["✅ Ganadores", "❌ Perdedores"])
-        fmt_config = {
-            'Inversion_Inicial': '${:,.2f}', 'Resultado_USD': '${:,.2f}', 
-            'Rendimiento_%': '{:.2f}%', 'Size_vs_10k_%': '{:.2f}%',
-            'Precio_Entrada': '{:.2f}', 'Cant_Total': '{:.4f}'
-        }
-        
-        with tab1:
-            st.dataframe(ganadores[cols_finales].style.format(fmt_config), use_container_width=True)
-        with tab2:
-            st.dataframe(perdedores[cols_finales].style.format(fmt_config), use_container_width=True)
+        t1, t2 = st.tabs(["Ganadores ✅", "Perdedores ❌"])
+        with t1: st.dataframe(ganadores.style.format(fmt), use_container_width=True)
+        with t2: st.dataframe(perdedores.style.format(fmt), use_container_width=True)
 
     except Exception as e:
-        st.error(f"⚠️ Hubo un problema procesando los datos: {e}")
+        st.error(f"⚠️ Error detallado: {e}")
+        st.write("Columnas actuales en el DF:", list(df_trades.columns))
