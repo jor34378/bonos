@@ -4,168 +4,88 @@ import glob
 import os
 import numpy as np
 
-# --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Dashboard de Inversiones", layout="wide")
 
-# --- FUNCIONES DE CARGA BLINDADAS ---
-@st.cache_data
-def cargar_datos():
-    # 1. Carga de Movimientos
-    archivos_csv = glob.glob("Movimientos_*.csv")
-    if not archivos_csv:
-        st.error("No se encontraron archivos 'Movimientos_*.csv'")
-        return None, None, None
-        
-    lista_dataframes = []
-    for ruta in archivos_csv:
-        nombre_base = os.path.basename(ruta)
-        ticker = nombre_base.split('_')[1].split('.')[0]
-        df_temp = pd.read_csv(ruta, sep=None, engine='python', encoding='latin-1', dtype=str)
-        
-        # Limpieza de nombres de columnas (quita espacios y BOM de Excel)
-        df_temp.columns = [str(col).strip().replace('ï»¿', '') for col in df_temp.columns]
-        
-        for col in ['Cantidad', 'Precio', 'Importe']:
-            if col in df_temp.columns:
-                df_temp[col] = df_temp[col].str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-                df_temp[col] = pd.to_numeric(df_temp[col], errors='coerce')
-        
-        df_temp.insert(0, 'Ticker', ticker)
-        lista_dataframes.append(df_temp)
-
-    df_mov = pd.concat(lista_dataframes, ignore_index=True)
-    df_mov["Operado"] = pd.to_datetime(df_mov["Operado"], dayfirst=True, errors='coerce').dt.normalize()
-    df_mov["Operación"] = df_mov["Operación"].replace({"CPRA": "Compra", "VTAS": "Venta"})
-
-    # 2. Carga de MEP
-    df_mep = pd.read_csv("DOLAR MEP - Cotizaciones historicas.csv")
-    df_mep.columns = [str(c).strip().replace('ï»¿', '') for c in df_mep.columns]
-    df_mep["fecha"] = pd.to_datetime(df_mep["fecha"], errors='coerce').dt.normalize()
-    df_mep = df_mep[["fecha", "cierre"]].rename(columns={"cierre": "Cotiz_mep", "fecha": "Operado"})
-    df_mep = df_mep.dropna(subset=['Operado']).sort_values('Operado')
-
-    # 3. Carga de Maestro - VERSIÓN BLINDADA
-    # Filtramos para NO leer archivos temporales de Excel que empiezan con ~$
-    archivos_maestro = [f for f in glob.glob('listado_ticker_bonos*.csv') if not os.path.basename(f).startswith('~$')]
-    
-    if not archivos_maestro:
-        st.warning("No se encontró el archivo Maestro. Se usará 'Sin Categoría'.")
-        df_maestro = pd.DataFrame(columns=['Ticker', 'Tipo'])
-    else:
-        ultimo_maestro = max(archivos_maestro, key=os.path.getctime)
-        df_maestro = pd.read_csv(ultimo_maestro, sep=None, engine='python', encoding='latin1')
-        
-        # Limpieza profunda de encabezados
-        df_maestro.columns = [str(c).strip().replace('ï»¿', '') for c in df_maestro.columns]
-        
-        # Mapeo dinámico: busca cualquier columna que contenga "categ" (mayusc/minusc/tildes)
-        mapeo = {c: "Tipo" for c in df_maestro.columns if "categ" in c.lower()}
-        df_maestro = df_maestro.rename(columns=mapeo)
-        
-        # Si después de todo no existe 'Tipo', la creamos para evitar el error del groupby
-        if 'Tipo' not in df_maestro.columns:
-            df_maestro['Tipo'] = 'General'
-
-    return df_mov, df_mep, df_maestro
+# ... (Mantené tu función cargar_datos() igual a la anterior) ...
 
 # --- MOTOR DE CÁLCULO ---
-def procesar_cartera(df_mov, df_mep, df_maestro, precios_ref):
+def procesar_cartera(df_mov, df_mep, df_maestro, precios_manuales):
     MEP_HOY = df_mep['Cotiz_mep'].iloc[-1]
-
     df_solo_c_v = df_mov[df_mov["Operación"].isin(["Compra", "Venta"])].copy()
     
-    # Merge con Maestro
+    # Merge con Maestro y limpieza
     df_solo_c_v = pd.merge(df_solo_c_v, df_maestro[['Ticker', 'Tipo']], on='Ticker', how='left')
-    
-    # Rellenar tipos faltantes (para tickers nuevos que no estén en el maestro)
     df_solo_c_v['Tipo'] = df_solo_c_v['Tipo'].fillna('Otros')
-
     df_solo_c_v = df_solo_c_v.sort_values('Operado')
-    df_mep = df_mep.sort_values('Operado')
-
-    df_limpio = pd.merge_asof(
-        df_solo_c_v, 
-        df_mep[['Operado', 'Cotiz_mep']],
-        on='Operado', 
-        direction='backward'
-    )
-
-    if 'Cotiz_mep_hist' not in df_limpio.columns:
-        # Si merge_asof usó el nombre original
-        df_limpio = df_limpio.rename(columns={'Cotiz_mep_y': 'Cotiz_mep_hist', 'Cotiz_mep_x': 'Cotiz_mep'})
-
+    
+    df_limpio = pd.merge_asof(df_solo_c_v, df_mep[['Operado', 'Cotiz_mep']], on='Operado', direction='backward')
     df_limpio['MEP_Final'] = df_limpio['Cotiz_mep'].fillna(MEP_HOY)
     df_limpio['Importe_ARS'] = (df_limpio['Precio'] * df_limpio['Cantidad']).abs() / 100
     df_limpio['Importe_USD'] = df_limpio['Importe_ARS'] / df_limpio['MEP_Final']
 
     resumen = []
-    # El groupby ahora es seguro porque 'Tipo' está garantizado
     for (tipo, ticker), group in df_limpio.groupby(['Tipo', 'Ticker']):
         c_neta, c_nom, tot_ars_c, tot_usd_c = 0, 0, 0, 0
-        v_nom, tot_ars_v, tot_usd_v = 0, 0, 0
-
+        
         for _, row in group.iterrows():
-            if abs(c_neta) < 0.1:
+            if abs(c_neta) < 0.1: # Reset de ciclo si la posición se cerró
                 c_nom, tot_ars_c, tot_usd_c = 0, 0, 0
-                v_nom, tot_ars_v, tot_usd_v = 0, 0, 0
-
             cant = row['Cantidad']
             if cant > 0:
                 c_neta += cant; c_nom += cant
                 tot_ars_c += row['Importe_ARS']; tot_usd_c += row['Importe_USD']
             else:
-                c_neta += cant; v_nom += abs(cant)
-                tot_ars_v += row['Importe_ARS']; tot_usd_v += row['Importe_USD']
+                c_neta += cant
 
         estado = "Abierto" if abs(c_neta) > 0.5 else "Cerrado"
         ppp_ars = (tot_ars_c / c_nom * 100) if c_nom > 0 else 0
         ppp_usd = (tot_usd_c / c_nom * 100) if c_nom > 0 else 0
         
-        if estado == "Abierto":
-            p_exit_ars = precios_ref.get(ticker, ppp_ars)
-            p_exit_usd = p_exit_ars / MEP_HOY
-        else:
-            p_exit_ars = (tot_ars_v / v_nom * 100) if v_nom > 0 else 0
-            p_exit_usd = (tot_usd_v / v_nom * 100) if v_nom > 0 else 0
+        # --- LÓGICA DE PRECIO MANUAL ---
+        # Buscamos si el usuario ingresó un precio en el editor, sino usamos el PPP
+        p_exit_usd = precios_manuales.get(ticker, ppp_usd)
 
         resumen.append({
             'Ticker': ticker, 'Tipo': tipo, 'Cant_Final': round(c_neta, 0),
-            'PPP_ARS': ppp_ars, 'P_Exit_ARS': p_exit_ars, 'Rinde_ARS_%': ((p_exit_ars / ppp_ars) - 1) * 100 if ppp_ars > 0 else 0,
-            'PPP_USD': ppp_usd, 'P_Exit_USD': p_exit_usd, 'Rinde_USD_%': ((p_exit_usd / ppp_usd) - 1) * 100 if ppp_usd > 0 else 0,
+            'PPP_USD': ppp_usd, 'P_Exit_USD': p_exit_usd, 
+            'Rinde_USD_%': ((p_exit_usd / ppp_usd) - 1) * 100 if ppp_usd > 0 else 0,
             'Estado': estado
         })
     return pd.DataFrame(resumen), MEP_HOY
 
 # --- INTERFAZ STREAMLIT ---
-st.title("📈 Mi Portafolio de Inversiones")
-
 try:
     df_mov, df_mep, df_maestro = cargar_datos()
 
     if df_mov is not None:
-        precios_broker = {
-            'BB37D': 101880.0, 'CUAP': 38440.0, 'DICP': 47270.0, 'GD38': 113420.0,
-            'GD41': 99230.0, 'PARP': 32190.0, 'TX28': 1866.0, 'TZX26': 364.20,
-            'TZX28': 304.30, 'TZXM6': 213.778, 'AE38': 109660.0, 'AL30': 65000.0
-        }
+        # --- SECCIÓN DE PRECIOS MANUALES EN SIDEBAR ---
+        st.sidebar.header("⚙️ Ajuste de Precios USD")
+        st.sidebar.write("Editá la columna 'Precio_USD' para actualizar los bonos:")
+        
+        # Creamos un DF inicial con los tickers únicos abiertos
+        tickers_unicos = df_mov['Ticker'].unique()
+        df_precios_init = pd.DataFrame({'Ticker': tickers_unicos, 'Precio_USD': 0.0})
+        
+        # El Data Editor permite escribir sobre la tabla
+        df_editado = st.sidebar.data_editor(
+            df_precios_init, 
+            column_config={"Precio_USD": st.column_config.NumberColumn(format="U$S %.2f")},
+            disabled=["Ticker"], # Que no puedan cambiar el nombre del bono
+            hide_index=True
+        )
+        
+        # Convertimos el DF editado en un diccionario {Ticker: Precio}
+        # Solo tomamos los que tienen precio mayor a 0
+        precios_manuales = df_editado[df_editado['Precio_USD'] > 0].set_index('Ticker')['Precio_USD'].to_dict()
 
-        df_res, mep_val = procesar_cartera(df_mov, df_mep, df_maestro, precios_broker)
+        # Procesamos con los precios que el usuario escribió
+        df_res, mep_val = procesar_cartera(df_mov, df_mep, df_maestro, precios_manuales)
 
+        st.title("📈 Mi Portafolio de Inversiones")
         st.metric("Cotización MEP Hoy", f"${mep_val:,.2f}")
 
-        estado_filtro = st.multiselect("Filtrar por Estado", ["Abierto", "Cerrado"], default=["Abierto"])
-        df_filtrado = df_res[df_res['Estado'].isin(estado_filtro)]
-
-        for cat in df_filtrado['Tipo'].unique():
-            if pd.isna(cat): continue
-            with st.expander(f"Estrategia: {cat.upper()}", expanded=True):
-                df_cat = df_filtrado[df_filtrado['Tipo'] == cat]
-                st.dataframe(df_cat.style.format({
-                    'Cant_Final': '{:,.0f}', 'PPP_ARS': '${:,.2f}', 'P_Exit_ARS': '${:,.2f}',
-                    'Rinde_ARS_%': '{:.2f}%', 'PPP_USD': 'U$S {:,.2f}', 'P_Exit_USD': 'U$S {:,.2f}',
-                    'Rinde_USD_%': '{:.2f}%'
-                }).background_gradient(subset=['Rinde_USD_%'], cmap='RdYlGn', vmin=-10, vmax=10), use_container_width=True)
+        # ... (Resto de los filtros y visualización de tablas igual que antes) ...
+        # [Asegurate de que las tablas muestren las columnas USD que calculamos]
 
 except Exception as e:
-    st.error(f"Error crítico en la aplicación: {e}")
-    st.info("Tip: Asegurate de no tener los archivos CSV abiertos en Excel mientras corrés la app.")
+    st.error(f"Error: {e}")
