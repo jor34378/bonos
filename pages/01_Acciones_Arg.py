@@ -9,15 +9,24 @@ st.set_page_config(page_title="Acciones Argentinas", layout="wide")
 
 @st.cache_data
 def procesar_datos_desde_cero():
-    # 1. Cargar el archivo original (el que bajás de la plataforma)
-    # Ajustá el nombre si en GitHub se llama distinto
-    archivo_base = 'df_veta_consolidado.csv' 
+    # Intentamos buscar el archivo en la raíz y en la carpeta actual
+    posibles_rutas = ['df_veta_consolidado.csv', '../df_veta_consolidado.csv', 'pages/df_veta_consolidado.csv']
+    archivo_base = None
+
+    for ruta in posibles_rutas:
+        if os.path.exists(ruta):
+            archivo_base = ruta
+            break
     
-    if not os.path.exists(archivo_base):
-        st.error(f"⚠️ No se encuentra el archivo {archivo_base} en GitHub.")
+    if archivo_base is None:
+        st.error(f"⚠️ No se encuentra 'df_veta_consolidado.csv'.")
+        st.info(f"Archivos detectados en esta carpeta: {os.listdir('.')}")
         return None
 
+    # Si lo encontró, procedemos con la carga
     df = pd.read_csv(archivo_base, encoding='latin1', sep=None, engine='python')
+    
+    # ... (El resto de tu código de la notebook que ya pegaste antes)
     
     # 2. Lógica de Tickers y Categorías (Tu "Diccionario" de la notebook)
     data_tickers = [
