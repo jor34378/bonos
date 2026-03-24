@@ -4,151 +4,119 @@ import numpy as np
 import yfinance as yf
 import os
 
-# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Acciones Argentinas", layout="wide")
 
 @st.cache_data
 def cargar_datos_argentina():
     archivo = 'reporte_trades_para_ARG.csv'
-    
     if not os.path.exists(archivo):
-        st.error(f"⚠️ No se encuentra el archivo '{archivo}'.")
-        st.info("Asegurate de haber guardado el CSV con ese nombre en la misma carpeta que este script.")
+        st.error(f"⚠️ No se encuentra '{archivo}'")
         return None
 
-    # Carga con detección de separador y encoding seguro para Argentina
     df = pd.read_csv(archivo, sep=None, engine='python', encoding='utf-8-sig')
-    
-    # Limpieza de nombres de columnas (minúsculas y sin espacios)
     df.columns = [str(c).strip().lower() for c in df.columns]
     
-    # Mapeo para estandarizar (Ajusta estos nombres según tu CSV real)
     mapeo = {
-        'ticker': 'Ticker',
-        'operado': 'fecha',
-        'cantidad': 'Cantidad',
-        'precio': 'Precio',
-        'precio_usd': 'Precio_USD',
-        'inversion_usd': 'Inversion_USD',
-        'operacion': 'Operacion'
+        'ticker': 'Ticker', 'operado': 'fecha', 'cantidad': 'Cantidad',
+        'precio': 'Precio', 'precio_usd': 'Precio_USD',
+        'inversion_usd': 'Inversion_USD', 'operacion': 'Operacion'
     }
     df = df.rename(columns={k: v for k, v in mapeo.items() if k in df.columns})
     
-    # Conversión de fechas
     if 'fecha' in df.columns:
         df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
     
-    # --- LÓGICA DE TRADES (Agrupación por Ciclos de Posición) ---
+    # --- PROCESAMIENTO ---
     df = df.sort_values(['Ticker', 'fecha'])
+    df['Posicion_Acum'] = df.groupby('Ticker')['Cantidad'].cumsum()
+
+    # CORRECCIÓN 1: Limpieza de residuos (FERR e IRSA)
+    # Cualquier posición acumulada menor a 1 nominal se considera 0 (cerrada)
+    df.loc[df['Posicion_Acum'].abs() < 1.0, 'Posicion_Acum'] = 0.0
     
-    # Calculamos la posición acumulada para saber qué está abierto y qué cerrado
-    # Nota: Las ventas deben ser negativas en la columna Cantidad para que esto funcione
-    df['Posicion_Acum'] = df.groupby('Ticker')['Cantidad'].cumsum().round(4)
-    
-    # Identificar cierres (cuando la posición vuelve a cero)
-    df['Es_Cierre'] = (df['Posicion_Acum'].abs() < 0.0001)
-    
-    # Generar ID de Trade único por ciclo
+    # Identificar cierres y generar ID de Trade
+    df['Es_Cierre'] = (df['Posicion_Acum'] == 0)
     df['ID_Trade'] = (df.groupby('Ticker')['Es_Cierre'].shift(fill_value=False)
                       .groupby(df['Ticker']).cumsum() + 1)
     
-    # Determinar estado final de cada ID_Trade
+    # Determinar estado
     status = df.groupby(['Ticker', 'ID_Trade'])['Posicion_Acum'].last().apply(
-        lambda x: 'Abierto' if abs(x) >= 0.0001 else 'Cerrado'
+        lambda x: 'Abierto' if abs(x) >= 1.0 else 'Cerrado'
     ).reset_index(name='Estado_Trade')
     
     return df.merge(status, on=['Ticker', 'ID_Trade'])
 
 def obtener_precios_merval(tickers):
-    # Agregamos .BA para Yahoo Finance
+    if len(tickers) == 0: return {}
     tickers_yf = [f"{t}.BA" for t in tickers]
     try:
-        # Descargamos solo el último precio
-        data = yf.download(tickers_yf, period="1d", interval="1m", progress=False)['Close']
+        data = yf.download(tickers_yf, period="1d", progress=False)['Close']
         precios = {}
         for t in tickers:
-            t_ba = f"{t}.BA"
-            if t_ba in data.columns:
-                # Tomamos el último valor no nulo
-                val = data[t_ba].dropna()
-                if not val.empty:
-                    precios[t] = val.iloc[-1]
+            col = f"{t}.BA"
+            if col in data.columns:
+                val = data[col].dropna()
+                if not val.empty: precios[t] = val.iloc[-1]
+            elif len(tickers) == 1: # Caso un solo ticker
+                precios[t] = data.iloc[-1]
         return precios
-    except Exception as e:
-        st.warning(f"Error al conectar con Yahoo Finance: {e}")
+    except:
         return {}
 
-# --- INTERFAZ STREAMLIT ---
+# --- INTERFAZ ---
 st.title("🇦🇷 Cartera de Acciones Argentinas")
-st.markdown("---")
-
 df_arg = cargar_datos_argentina()
 
 if df_arg is not None:
-    # Cotización MEP de referencia (Podrías automatizarlo también)
-    mep_referencia = st.sidebar.number_input("Cotización MEP Referencia", value=1433.21)
+    mep_hoy = st.sidebar.number_input("Cotización MEP", value=1433.21)
 
-    # --- SECCIÓN 1: POSICIONES ABIERTAS ---
-    st.subheader("🔵 Posiciones Actuales (En Cartera)")
+    # --- POSICIONES ABIERTAS ---
+    st.subheader("🔵 Posiciones Actuales")
     df_abiertos = df_arg[df_arg['Estado_Trade'] == 'Abierto'].copy()
     
     if not df_abiertos.empty:
-        # Obtenemos precios en tiempo real
-        listado_tickers = df_abiertos['Ticker'].unique()
-        dict_precios = obtener_precios_merval(listado_tickers)
+        dict_precios = obtener_precios_merval(df_abiertos['Ticker'].unique().tolist())
         
-        # Agrupamos por Trade
-        resumen_abierto = df_abiertos.groupby(['Ticker', 'ID_Trade']).agg({
+        resumen = df_abiertos.groupby(['Ticker', 'ID_Trade']).agg({
             'Posicion_Acum': 'last',
-            'Inversion_USD': 'sum',
+            'Inversion_USD': 'sum', # Compras son negativas, Ventas positivas
             'fecha': 'min'
         }).reset_index()
         
-        resumen_abierto = resumen_abierto.rename(columns={'fecha': 'Fecha_Inicio'})
-        resumen_abierto['Precio_Actual_ARS'] = resumen_abierto['Ticker'].map(dict_precios)
+        resumen['Precio_Actual_ARS'] = resumen['Ticker'].map(dict_precios)
         
-        # Valuación y Rendimiento
-        resumen_abierto['Valuacion_USD'] = (resumen_abierto['Posicion_Acum'] * resumen_abierto['Precio_Actual_ARS']) / mep_referencia
-        resumen_abierto['Ganancia_USD'] = resumen_abierto['Valuacion_USD'] + resumen_abierto['Inversion_USD'] # Inversion_USD es negativa si es compra
-        resumen_abierto['Rend_%'] = (resumen_abierto['Ganancia_USD'] / resumen_abierto['Inversion_USD'].abs()) * 100
+        # CORRECCIÓN 2: Lógica de Ganancia
+        # Valuación Actual en USD
+        resumen['Valuacion_USD'] = (resumen['Posicion_Acum'] * resumen['Precio_Actual_ARS']) / mep_hoy
         
-        # Mostrar Tabla
-        st.dataframe(resumen_abierto.style.format({
-            'Posicion_Acum': '{:,.2f}',
-            'Inversion_USD': 'US$ {:,.2f}',
-            'Precio_Actual_ARS': '$ {:,.2f}',
-            'Valuacion_USD': 'US$ {:,.2f}',
-            'Ganancia_USD': 'US$ {:,.2f}',
-            'Rend_%': '{:.2f}%'
-        }).background_gradient(subset=['Rend_%'], cmap='RdYlGn'), use_container_width=True)
+        # Ganancia = Valuacion_Actual + Flujo_Inversion 
+        # (Recordá: Inversion_USD es negativa porque salió plata de la cuenta)
+        resumen['Ganancia_USD'] = resumen['Valuacion_USD'] + resumen['Inversion_USD']
+        
+        # Rendimiento % = (Ganancia / Costo_Total_Absoluto) * 100
+        resumen['Rend_%'] = (resumen['Ganancia_USD'] / resumen['Inversion_USD'].abs()) * 100
+        
+        st.dataframe(resumen.style.format({
+            'Posicion_Acum': '{:,.0f}', 'Inversion_USD': 'US$ {:,.2f}',
+            'Precio_Actual_ARS': '$ {:,.2f}', 'Valuacion_USD': 'US$ {:,.2f}', 
+            'Ganancia_USD': 'US$ {:,.2f}', 'Rend_%': '{:.2f}%'
+        }).background_gradient(subset=['Rend_%'], cmap='RdYlGn', vmin=-20, vmax=20), use_container_width=True)
     else:
-        st.info("No se detectaron posiciones abiertas.")
+        st.info("No hay trades abiertos (IRSA y FERR ahora están en el historial).")
 
-    # --- SECCIÓN 2: HISTORIAL (CERRADOS) ---
-    st.write("---")
+    # --- HISTORIAL ---
     st.subheader("🟢 Historial de Trades Cerrados")
-    df_historial = df_arg[df_arg['Estado_Trade'] == 'Cerrado'].copy()
-    
-    if not df_historial.empty:
-        resumen_cerrado = df_historial.groupby(['Ticker', 'ID_Trade']).agg({
+    df_cerrados = df_arg[df_arg['Estado_Trade'] == 'Cerrado'].copy()
+    if not df_cerrados.empty:
+        resumen_c = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg({
             'fecha': ['min', 'max'],
             'Inversion_USD': 'sum'
         }).reset_index()
+        resumen_c.columns = ['Ticker', 'ID_Trade', 'Fecha_In', 'Fecha_Out', 'P&L_Final_USD']
         
-        # Aplanamos columnas del groupby
-        resumen_cerrado.columns = ['Ticker', 'ID_Trade', 'Fecha_In', 'Fecha_Out', 'Resultado_Final_USD']
+        # En trades cerrados, la suma del flujo es el resultado (Ventas - Compras)
+        resumen_c['P&L_Final_USD'] = -resumen_c['P&L_Final_USD'] # Invertimos signo para que positivo = ganancia
         
-        # En contabilidad de flujo, la suma de Inversion_USD en un trade cerrado es la ganancia neta
-        # (Venta (+) y Compra (-) = Resultado)
-        resumen_cerrado['Resultado_Final_USD'] = -resumen_cerrado['Resultado_Final_USD'] 
-        
-        st.dataframe(resumen_cerrado.sort_values('Fecha_Out', ascending=False).style.format({
-            'Resultado_Final_USD': 'US$ {:,.2f}'
-        }).background_gradient(subset=['Resultado_Final_USD'], cmap='RdYlGn'), use_container_width=True)
-        
-        # Métricas Rápidas
-        c1, c2 = st.columns(2)
-        c1.metric("Ganancia Histórica Total", f"US$ {resumen_cerrado['Resultado_Final_USD'].sum():,.2f}")
-        c2.metric("Mejor Trade", f"US$ {resumen_cerrado['Resultado_Final_USD'].max():,.2f}")
-    else:
-        st.info("Aún no tienes trades cerrados registrados.")
+        st.dataframe(resumen_c.sort_values('Fecha_Out', ascending=False).style.format({
+            'P&L_Final_USD': 'US$ {:,.2f}'
+        }).background_gradient(subset=['P&L_Final_USD'], cmap='RdYlGn'), use_container_width=True)
