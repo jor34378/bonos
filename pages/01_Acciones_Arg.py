@@ -30,16 +30,13 @@ def cargar_datos_argentina():
     df = df.sort_values(['Ticker', 'fecha'])
     df['Posicion_Acum'] = df.groupby('Ticker')['Cantidad'].cumsum()
 
-    # CORRECCIÓN 1: Limpieza de residuos (FERR e IRSA)
-    # Cualquier posición acumulada menor a 1 nominal se considera 0 (cerrada)
+    # Limpieza de residuos para cerrar IRSA y FERR
     df.loc[df['Posicion_Acum'].abs() < 1.0, 'Posicion_Acum'] = 0.0
     
-    # Identificar cierres y generar ID de Trade
     df['Es_Cierre'] = (df['Posicion_Acum'] == 0)
     df['ID_Trade'] = (df.groupby('Ticker')['Es_Cierre'].shift(fill_value=False)
                       .groupby(df['Ticker']).cumsum() + 1)
     
-    # Determinar estado
     status = df.groupby(['Ticker', 'ID_Trade'])['Posicion_Acum'].last().apply(
         lambda x: 'Abierto' if abs(x) >= 1.0 else 'Cerrado'
     ).reset_index(name='Estado_Trade')
@@ -47,7 +44,7 @@ def cargar_datos_argentina():
     return df.merge(status, on=['Ticker', 'ID_Trade'])
 
 def obtener_precios_merval(tickers):
-    if len(tickers) == 0: return {}
+    if not tickers: return {}
     tickers_yf = [f"{t}.BA" for t in tickers]
     try:
         data = yf.download(tickers_yf, period="1d", progress=False)['Close']
@@ -57,7 +54,7 @@ def obtener_precios_merval(tickers):
             if col in data.columns:
                 val = data[col].dropna()
                 if not val.empty: precios[t] = val.iloc[-1]
-            elif len(tickers) == 1: # Caso un solo ticker
+            elif len(tickers) == 1:
                 precios[t] = data.iloc[-1]
         return precios
     except:
@@ -77,32 +74,41 @@ if df_arg is not None:
     if not df_abiertos.empty:
         dict_precios = obtener_precios_merval(df_abiertos['Ticker'].unique().tolist())
         
+        # Agrupamos para obtener el costo y la cantidad actual
         resumen = df_abiertos.groupby(['Ticker', 'ID_Trade']).agg({
             'Posicion_Acum': 'last',
-            'Inversion_USD': 'sum', # Compras son negativas, Ventas positivas
+            'Inversion_USD': 'sum', # Este es el flujo neto (usualmente negativo si compraste)
             'fecha': 'min'
         }).reset_index()
         
         resumen['Precio_Actual_ARS'] = resumen['Ticker'].map(dict_precios)
         
-        # CORRECCIÓN 2: Lógica de Ganancia
-        # Valuación Actual en USD
+        # --- LÓGICA DE CÁLCULO CORREGIDA ---
+        # 1. Valuación actual
         resumen['Valuacion_USD'] = (resumen['Posicion_Acum'] * resumen['Precio_Actual_ARS']) / mep_hoy
         
-        # Ganancia = Valuacion_Actual + Flujo_Inversion 
-        # (Recordá: Inversion_USD es negativa porque salió plata de la cuenta)
-        resumen['Ganancia_USD'] = resumen['Valuacion_USD'] + resumen['Inversion_USD']
+        # 2. Inversión (Costo): La tratamos como positivo para la resta
+        # Si Inversion_USD es -100 (compra), el costo es 100.
+        resumen['Inversion_Costo_USD'] = resumen['Inversion_USD'].abs()
         
-        # Rendimiento % = (Ganancia / Costo_Total_Absoluto) * 100
-        resumen['Rend_%'] = (resumen['Ganancia_USD'] / resumen['Inversion_USD'].abs()) * 100
+        # 3. Ganancia/Pérdida = Valuación - Inversión
+        resumen['Ganancia_USD'] = resumen['Valuacion_USD'] - resumen['Inversion_Costo_USD']
         
-        st.dataframe(resumen.style.format({
-            'Posicion_Acum': '{:,.0f}', 'Inversion_USD': 'US$ {:,.2f}',
-            'Precio_Actual_ARS': '$ {:,.2f}', 'Valuacion_USD': 'US$ {:,.2f}', 
-            'Ganancia_USD': 'US$ {:,.2f}', 'Rend_%': '{:.2f}%'
-        }).background_gradient(subset=['Rend_%'], cmap='RdYlGn', vmin=-20, vmax=20), use_container_width=True)
+        # 4. Rendimiento %
+        resumen['Rend_%'] = (resumen['Ganancia_USD'] / resumen['Inversion_Costo_USD']) * 100
+        
+        # Reordenar y formatear columnas para que sea claro
+        cols_mostrar = ['Ticker', 'Posicion_Acum', 'Inversion_Costo_USD', 'Valuacion_USD', 'Ganancia_USD', 'Rend_%']
+        
+        st.dataframe(resumen[cols_mostrar].style.format({
+            'Posicion_Acum': '{:,.0f}', 
+            'Inversion_Costo_USD': 'US$ {:,.2f}',
+            'Valuacion_USD': 'US$ {:,.2f}', 
+            'Ganancia_USD': 'US$ {:,.2f}', 
+            'Rend_%': '{:.2f}%'
+        }).background_gradient(subset=['Rend_%'], cmap='RdYlGn', vmin=-15, vmax=15), use_container_width=True)
     else:
-        st.info("No hay trades abiertos (IRSA y FERR ahora están en el historial).")
+        st.info("No hay trades abiertos.")
 
     # --- HISTORIAL ---
     st.subheader("🟢 Historial de Trades Cerrados")
@@ -114,8 +120,8 @@ if df_arg is not None:
         }).reset_index()
         resumen_c.columns = ['Ticker', 'ID_Trade', 'Fecha_In', 'Fecha_Out', 'P&L_Final_USD']
         
-        # En trades cerrados, la suma del flujo es el resultado (Ventas - Compras)
-        resumen_c['P&L_Final_USD'] = -resumen_c['P&L_Final_USD'] # Invertimos signo para que positivo = ganancia
+        # En cerrados, el flujo neto invertido es la ganancia (Venta + y Compra -)
+        resumen_c['P&L_Final_USD'] = -resumen_c['P&L_Final_USD'] 
         
         st.dataframe(resumen_c.sort_values('Fecha_Out', ascending=False).style.format({
             'P&L_Final_USD': 'US$ {:,.2f}'
