@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.figure_factory as ff
 import os
 
 st.set_page_config(page_title="Performance USA", layout="wide")
@@ -37,42 +36,43 @@ resumen_stats = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg(
     Precio_Entrada = ('Precio_Unitario','first')
 ).reset_index()
 
-# Signo correcto: Neto_Flujo negativo → ganancia → Resultado_USD positivo
-resumen_stats['Resultado_USD']    = -resumen_stats['Neto_Flujo']
-resumen_stats['Inversion_Inicial']= resumen_stats['Cant_Total'] * resumen_stats['Precio_Entrada']
-resumen_stats['Precio_Salida']    = (resumen_stats['Inversion_Inicial'] + resumen_stats['Resultado_USD']) / resumen_stats['Cant_Total']
-resumen_stats['Rendimiento_%']    = (resumen_stats['Resultado_USD'] / resumen_stats['Inversion_Inicial']) * 100
-resumen_stats['Fecha_In']         = pd.to_datetime(resumen_stats['Fecha_In']).dt.date
-resumen_stats['Fecha_Out']        = pd.to_datetime(resumen_stats['Fecha_Out']).dt.date
+# Compra = +X, Venta = -X → suma por trade negativa = ganancia → *-1 para corregir
+resumen_stats['Resultado_USD']     = -resumen_stats['Neto_Flujo']
+resumen_stats['Inversion_Inicial'] = resumen_stats['Cant_Total'] * resumen_stats['Precio_Entrada']
+resumen_stats['Precio_Salida']     = (resumen_stats['Inversion_Inicial'] + resumen_stats['Resultado_USD']) / resumen_stats['Cant_Total']
+resumen_stats['Rendimiento_%']     = (resumen_stats['Resultado_USD'] / resumen_stats['Inversion_Inicial']) * 100
+resumen_stats['Fecha_In']          = pd.to_datetime(resumen_stats['Fecha_In']).dt.date
+resumen_stats['Fecha_Out']         = pd.to_datetime(resumen_stats['Fecha_Out']).dt.date
 
-# ── 2. Métricas ───────────────────────────────────────────────────────────────
+# ── 2. Clasificación correcta ─────────────────────────────────────────────────
+# Resultado_USD > 0 → ganancia ✅ / Resultado_USD <= 0 → pérdida ❌
 ganadores  = resumen_stats[resumen_stats['Resultado_USD'] > 0].copy()
 perdedores = resumen_stats[resumen_stats['Resultado_USD'] <= 0].copy()
 
-total_trades   = len(resumen_stats)
-win_rate       = (len(ganadores) / total_trades) * 100
-loss_rate      = 100 - win_rate
-avg_win        = ganadores['Resultado_USD'].mean()   if not ganadores.empty  else 0
-avg_loss       = perdedores['Resultado_USD'].abs().mean() if not perdedores.empty else 0
-risk_reward    = avg_win / avg_loss if avg_loss != 0 else 0
-ganancia_neta  = resumen_stats['Resultado_USD'].sum()
-roi            = (ganancia_neta / 6000) * 100
+total_trades  = len(resumen_stats)
+win_rate      = (len(ganadores) / total_trades) * 100
+loss_rate     = 100 - win_rate
+avg_win       = ganadores['Resultado_USD'].mean()        if not ganadores.empty  else 0
+avg_loss      = perdedores['Resultado_USD'].abs().mean() if not perdedores.empty else 0
+risk_reward   = avg_win / avg_loss if avg_loss != 0 else 0
+ganancia_neta = resumen_stats['Resultado_USD'].sum()
+roi           = (ganancia_neta / 6000) * 100
 
-# ── 3. Header ─────────────────────────────────────────────────────────────────
+# ── 3. Métricas ───────────────────────────────────────────────────────────────
 st.title("🇺🇸 Análisis de Estrategia - Acciones USA")
 st.caption("Capital Base: $6,000")
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Win Rate ✅",        f"{win_rate:.1f}%")
-c2.metric("Loss Rate ❌",       f"{loss_rate:.1f}%")
-c3.metric("Ganancia Neta",      f"$ {ganancia_neta:,.2f}")
-c4.metric("Ratio B/R",          f"1 : {risk_reward:.2f}")
-c5.metric("ROI sobre 6k",       f"{roi:.2f}%")
-c6.metric("Total Trades",       total_trades)
+c1.metric("Win Rate ✅",      f"{win_rate:.1f}%")
+c2.metric("Loss Rate ❌",     f"{loss_rate:.1f}%")
+c3.metric("Ganancia Neta",    f"$ {ganancia_neta:,.2f}")
+c4.metric("Ratio B/R",        f"1 : {risk_reward:.2f}")
+c5.metric("ROI sobre 6k",     f"{roi:.2f}%")
+c6.metric("Total Trades",     total_trades)
 
 st.divider()
 
-# ── 4. Gráficos: Pie + Histograma ─────────────────────────────────────────────
+# ── 4. Pie + Histograma ───────────────────────────────────────────────────────
 col_left, col_right = st.columns(2)
 
 with col_left:
@@ -85,18 +85,16 @@ with col_left:
         pull          = [0.05, 0],
         textinfo      = 'label+percent',
     ))
-    fig_pie.update_layout(margin=dict(t=20, b=20), showlegend=True)
+    fig_pie.update_layout(margin=dict(t=20, b=20))
     st.plotly_chart(fig_pie, use_container_width=True)
 
 with col_right:
     st.subheader("Distribución de Ganancia/Pérdida (USD)")
-    fig_hist = go.Figure()
-    fig_hist.add_trace(go.Histogram(
+    fig_hist = go.Figure(go.Histogram(
         x            = resumen_stats['Resultado_USD'],
         nbinsx       = 20,
         marker_color = 'skyblue',
         opacity      = 0.8,
-        name         = 'Frecuencia'
     ))
     fig_hist.add_vline(x=0, line_dash="dash", line_color="red",
                        annotation_text="Break even", annotation_position="top right")
@@ -104,43 +102,40 @@ with col_right:
         xaxis_title = "Resultado USD",
         yaxis_title = "Frecuencia",
         margin      = dict(t=20, b=40),
-        bargap      = 0.05,
     )
     st.plotly_chart(fig_hist, use_container_width=True)
 
 st.divider()
 
-# ── 5. Monte Carlo ────────────────────────────────────────────────────────────
+# ── 5. Monte Carlo (con datos reales) ─────────────────────────────────────────
 st.subheader("🎲 Simulación Monte Carlo — Próximos 107 Trades")
 
 capital_inicial = 6000
-perdida_media   = float(avg_loss)   if avg_loss > 0  else 30.0
-ganancia_media  = float(avg_win)    if avg_win > 0   else perdida_media * 2
+ganancia_media  = float(avg_win)  if avg_win  > 0 else 30.0
+perdida_media   = float(avg_loss) if avg_loss > 0 else 30.0
 prob_win        = win_rate / 100
 n_trades        = 107
 n_simulaciones  = 1000
 
 resultados_finales = []
-# Graficamos solo 200 trayectorias para no saturar
 fig_mc = go.Figure()
 
-trayectorias_plot = []
 for i in range(n_simulaciones):
-    eventos     = np.random.choice([ganancia_media, -perdida_media],
-                                   size=n_trades, p=[prob_win, 1 - prob_win])
+    eventos     = np.random.choice(
+        [ganancia_media, -perdida_media],
+        size = n_trades,
+        p    = [prob_win, 1 - prob_win]
+    )
     trayectoria = capital_inicial + np.cumsum(eventos)
     resultados_finales.append(float(trayectoria[-1]))
-    if i < 200:
-        trayectorias_plot.append(trayectoria.tolist())
-
-for tray in trayectorias_plot:
-    fig_mc.add_trace(go.Scatter(
-        y          = tray,
-        mode       = 'lines',
-        line       = dict(color='royalblue', width=1),
-        opacity    = 0.06,
-        showlegend = False,
-    ))
+    if i < 200:  # graficamos solo 200 para no saturar el browser
+        fig_mc.add_trace(go.Scatter(
+            y          = trayectoria.tolist(),
+            mode       = 'lines',
+            line       = dict(color='royalblue', width=1),
+            opacity    = 0.06,
+            showlegend = False,
+        ))
 
 fig_mc.add_hline(
     y                   = capital_inicial,
@@ -157,7 +152,6 @@ fig_mc.update_layout(
 )
 st.plotly_chart(fig_mc, use_container_width=True)
 
-# Estadísticas Monte Carlo
 ganancia_esperada = np.mean(resultados_finales) - capital_inicial
 prob_exito        = (np.array(resultados_finales) > capital_inicial).mean() * 100
 p10               = np.percentile(resultados_finales, 10)
@@ -165,16 +159,16 @@ p90               = np.percentile(resultados_finales, 90)
 media_final       = np.mean(resultados_finales)
 
 mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-mc1.metric("Capital Esperado",         f"$ {media_final:,.2f}")
-mc2.metric("Ganancia Esperada",        f"$ {ganancia_esperada:,.2f}")
-mc3.metric("Prob. de ser rentable",    f"{prob_exito:.1f}%")
-mc4.metric("Peor escenario (P10)",     f"$ {p10:,.2f}")
-mc5.metric("Mejor escenario (P90)",    f"$ {p90:,.2f}")
+mc1.metric("Capital Esperado",       f"$ {media_final:,.2f}")
+mc2.metric("Ganancia Esperada",      f"$ {ganancia_esperada:,.2f}")
+mc3.metric("Prob. de ser rentable",  f"{prob_exito:.1f}%")
+mc4.metric("Peor escenario (P10)",   f"$ {p10:,.2f}")
+mc5.metric("Mejor escenario (P90)",  f"$ {p90:,.2f}")
 
 st.info(
-    f"Basado en datos reales | Win Rate: {win_rate:.1f}% | "
-    f"Ganancia media: ${ganancia_media:.2f} | Pérdida media: ${perdida_media:.2f} | "
-    f"Ritmo: ~{n_trades/2.5:.0f} trades/año"
+    f"Win Rate real: {win_rate:.1f}% | "
+    f"Ganancia media: ${ganancia_media:.2f} | "
+    f"Pérdida media: ${perdida_media:.2f}"
 )
 
 st.divider()
@@ -183,25 +177,21 @@ st.divider()
 cols_mostrar = ['Ticker', 'ID_Trade', 'Fecha_In', 'Fecha_Out',
                 'Cant_Total', 'Precio_Entrada', 'Precio_Salida',
                 'Inversion_Inicial', 'Resultado_USD', 'Rendimiento_%']
-
 fmt = {
-    'Precio_Entrada':   '{:.2f}',
-    'Precio_Salida':    '{:.2f}',
-    'Inversion_Inicial':'${:,.2f}',
-    'Resultado_USD':    '${:,.2f}',
-    'Rendimiento_%':    '{:.2f}%',
+    'Precio_Entrada':    '{:.2f}',
+    'Precio_Salida':     '{:.2f}',
+    'Inversion_Inicial': '${:,.2f}',
+    'Resultado_USD':     '${:,.2f}',
+    'Rendimiento_%':     '{:.2f}%',
 }
 
 col_g, col_p = st.columns(2)
-
 with col_g:
     st.subheader(f"🟢 Trades Ganadores ({len(ganadores)})")
     if not ganadores.empty:
         st.dataframe(
-            ganadores[cols_mostrar]
-            .sort_values('Resultado_USD', ascending=False)
-            .style.format(fmt)
-            .background_gradient(subset=['Resultado_USD'], cmap='Greens'),
+            ganadores[cols_mostrar].sort_values('Resultado_USD', ascending=False)
+            .style.format(fmt).background_gradient(subset=['Resultado_USD'], cmap='Greens'),
             use_container_width=True,
         )
 
@@ -209,19 +199,15 @@ with col_p:
     st.subheader(f"🔴 Trades Perdedores ({len(perdedores)})")
     if not perdedores.empty:
         st.dataframe(
-            perdedores[cols_mostrar]
-            .sort_values('Resultado_USD', ascending=True)
-            .style.format(fmt)
-            .background_gradient(subset=['Resultado_USD'], cmap='Reds_r'),
+            perdedores[cols_mostrar].sort_values('Resultado_USD', ascending=True)
+            .style.format(fmt).background_gradient(subset=['Resultado_USD'], cmap='Reds_r'),
             use_container_width=True,
         )
 
 st.divider()
 st.subheader("📋 Todos los Trades")
 st.dataframe(
-    resumen_stats[cols_mostrar]
-    .sort_values('Resultado_USD', ascending=False)
-    .style.format(fmt)
-    .background_gradient(subset=['Resultado_USD'], cmap='RdYlGn'),
+    resumen_stats[cols_mostrar].sort_values('Resultado_USD', ascending=False)
+    .style.format(fmt).background_gradient(subset=['Resultado_USD'], cmap='RdYlGn'),
     use_container_width=True,
 )
