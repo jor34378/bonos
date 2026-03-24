@@ -4,54 +4,34 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# 1. CONFIGURACIÓN (Debe ser lo primero)
-st.set_page_config(page_title="Analítica de Trades USA", layout="wide")
+st.set_page_config(page_title="Performance Avanzada - USA", layout="wide")
 
 @st.cache_data
 def load_data():
     try:
-        # Cargamos el CSV detectando el separador automáticamente
         df = pd.read_csv('reporte_trades_para_USA.csv', sep=None, engine='python')
-        
-        # LIMPIEZA TOTAL DE COLUMNAS: Sin espacios y todo a MINÚSCULAS para mapear
         df.columns = [str(c).strip().lower() for c in df.columns]
-        
-        # Diccionario de mapeo
         mapeo = {
-            'ticker': 'Ticker',
-            'inversion_usa': 'Inversion_USA',
-            'estado_trade': 'Estado_Trade',
-            'fecha': 'fecha',
-            'cantidad_usa': 'Cantidad_USA',
-            'precio_unitario': 'Precio_Unitario',
+            'ticker': 'Ticker', 'inversion_usa': 'Inversion_USA',
+            'estado_trade': 'Estado_Trade', 'fecha': 'fecha',
+            'cantidad_usa': 'Cantidad_USA', 'precio_unitario': 'Precio_Unitario',
             'id_trade': 'ID_Trade'
         }
-        
         df = df.rename(columns={k: v for k, v in mapeo.items() if k in df.columns})
-        
         if 'fecha' in df.columns:
             df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
-        else:
-            fallback_date = [c for c in df.columns if 'fec' in c.lower() or 'dat' in c.lower()]
-            if fallback_date:
-                df = df.rename(columns={fallback_date[0]: 'fecha'})
-                df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
-
         return df
     except Exception as e:
         st.error(f"❌ Error al leer el archivo: {e}")
         return None
 
-# --- LÓGICA DE LA APP ---
-st.title("📊 Dashboard de Trading - Acciones USA")
+st.title("🚀 Dashboard de Trading de Alta Precisión")
 df_trades = load_data()
 
 if df_trades is not None:
     try:
-        # 2. PROCESAMIENTO
+        # --- PROCESAMIENTO ---
         df_cerrados = df_trades[df_trades['Estado_Trade'] == 'Cerrado'].copy()
-
-        # Agregación Nombrada para evitar errores de columnas
         resumen_stats = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg(
             Fecha_In=('fecha', 'min'),
             Fecha_Out=('fecha', 'max'),
@@ -60,102 +40,118 @@ if df_trades is not None:
             Precio_Entrada=('Precio_Unitario', 'first')
         ).reset_index()
 
-        # Cálculos de resultados
+        # Cálculos Base
         resumen_stats['Resultado_USD'] = resumen_stats['Neto_Flujo']
         resumen_stats['Inversion_Inicial'] = resumen_stats['Cant_Total'] * resumen_stats['Precio_Entrada']
-        resumen_stats['Precio_Salida'] = np.where(resumen_stats['Cant_Total'] > 0, 
-                                                (resumen_stats['Inversion_Inicial'] + resumen_stats['Resultado_USD']) / resumen_stats['Cant_Total'], 0)
         resumen_stats['Rendimiento_%'] = np.where(resumen_stats['Inversion_Inicial'] > 0, 
                                                 (resumen_stats['Resultado_USD'] / resumen_stats['Inversion_Inicial']) * 100, 0)
+        
+        # Métrica Solicitada: Tamaño del trade relativo a cuenta de 10k
+        resumen_stats['Size_vs_10k_%'] = (resumen_stats['Inversion_Inicial'] / 10000) * 100
 
         ganadores = resumen_stats[resumen_stats['Resultado_USD'] > 0].copy()
         perdedores = resumen_stats[resumen_stats['Resultado_USD'] <= 0].copy()
-        
-        total_trades = len(resumen_stats)
-        win_rate = (len(ganadores) / total_trades * 100) if total_trades > 0 else 0
 
-        # --- 3. MÉTRICAS CLAVE ---
+        # --- MÉTRICAS SOLICITADAS (ENCABEZADO) ---
+        # Promedios Ponderados (Weight = Inversión Inicial)
+        def ponderado(df):
+            if df.empty or df['Inversion_Inicial'].sum() == 0: return 0
+            return (df['Rendimiento_%'] * df['Inversion_Inicial']).sum() / df['Inversion_Inicial'].sum()
+
+        w_avg_gain = ponderado(ganadores)
+        w_avg_loss = ponderado(perdedores)
+        avg_size_10k = resumen_stats['Size_vs_10k_%'].mean()
+        profit_factor = ganadores['Resultado_USD'].sum() / abs(perdedores['Resultado_USD'].sum()) if not perdedores.empty else 0
+
+        st.subheader("📌 Métricas de Gestión de Riesgo (Benchmark 10k USD)")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Win Rate", f"{win_rate:.1f}%")
-        m2.metric("P&L Total", f"${resumen_stats['Resultado_USD'].sum():,.2f}")
-        m3.metric("Trade Promedio", f"${resumen_stats['Resultado_USD'].mean():,.2f}")
-        m4.metric("Capital Base", "$6,000")
+        m1.metric("Prom. Ponderado Ganancia", f"{w_avg_gain:.2f}%", delta_color="normal")
+        m2.metric("Prom. Ponderado Pérdida", f"{w_avg_loss:.2f}%", delta_color="inverse")
+        m3.metric("Avg Trade Size (s/10k)", f"{avg_size_10k:.2f}%")
+        m4.metric("Profit Factor", f"{profit_factor:.2f}x")
 
-        # --- 4. GRÁFICOS DE PERFORMANCE (Sin duplicados) ---
-        st.write("### Análisis de Efectividad y Distribución")
-        col_graf1, col_graf2 = st.columns([1, 2])
+        # --- GRÁFICOS (MÁXIMO 4) ---
+        st.write("---")
+        col_g1, col_g2 = st.columns(2)
         
-        with col_graf1:
-            fig1, ax1 = plt.subplots(figsize=(5, 5))
-            ax1.pie([len(ganadores), len(perdedores)], labels=['Wins', 'Losses'], 
-                    autopct='%1.1f%%', colors=['#2ecc71', '#e74c3c'], startangle=140)
-            ax1.set_title("Win Rate %")
+        with col_g1:
+            # Gráfico 1: Distribución P&L
+            fig1, ax1 = plt.subplots(figsize=(8, 4))
+            sns.histplot(resumen_stats['Resultado_USD'], kde=True, color='teal', ax=ax1)
+            ax1.set_title("Frecuencia de Ganancias/Pérdidas")
             st.pyplot(fig1)
+            
+            # Gráfico 3: ROI % por Trade (Scatter plot para ver consistencia)
+            fig3, ax3 = plt.subplots(figsize=(8, 4))
+            ax3.scatter(resumen_stats.index, resumen_stats['Rendimiento_%'], 
+                       c=np.where(resumen_stats['Rendimiento_%'] > 0, 'g', 'r'), alpha=0.6)
+            ax3.axhline(0, color='black', lw=1)
+            ax3.set_title("Rendimiento % Individual por Trade")
+            st.pyplot(fig3)
 
-        with col_graf2:
-            fig2, ax2 = plt.subplots(figsize=(10, 5))
-            sns.histplot(resumen_stats['Resultado_USD'], kde=True, color='skyblue', ax=ax2)
-            ax2.axvline(0, color='red', linestyle='--')
-            ax2.set_title("Distribución de Ganancia/Pérdida (USD)")
+        with col_g2:
+            # Gráfico 2: Win Rate %
+            fig2, ax2 = plt.subplots(figsize=(5, 4))
+            ax2.pie([len(ganadores), len(perdedores)], labels=['Wins', 'Losses'], 
+                    autopct='%1.1f%%', colors=['#2ecc71', '#e74c3c'], startangle=140)
+            ax2.set_title("Efectividad")
             st.pyplot(fig2)
+            
+            # Gráfico 4: Evolución del Capital (Equity Curve Real)
+            fig4, ax4 = plt.subplots(figsize=(8, 4))
+            equity_real = 10000 + resumen_stats['Resultado_USD'].cumsum()
+            ax4.plot(equity_real, marker='o', linestyle='-', color='royalblue')
+            ax4.set_title("Curva de Equidad Real (Base 10k)")
+            st.pyplot(fig4)
 
-        # --- 5. SIMULACIÓN MONTE CARLO (Más grande y escalada) ---
+        # --- SIMULACIÓN MONTE CARLO CON MEDIANA ---
         st.write("---")
-        st.write("### 🎲 Proyección Monte Carlo (Escenario a Futuro)")
+        st.write("### 🎲 Simulación Monte Carlo & Mediana Estadística")
         
-        st.sidebar.header("Parámetros de Simulación")
-        cap_inicial = st.sidebar.number_input("Capital Inicial ($)", value=6000)
         n_sim = st.sidebar.slider("Simulaciones", 100, 1000, 500)
-        volatilidad = st.sidebar.slider("Variabilidad USD", 5, 50, 15)
+        n_trades_future = st.sidebar.number_input("Trades a proyectar", value=len(resumen_stats))
 
-        if total_trades > 0:
-            avg_win = ganadores['Resultado_USD'].mean() if not ganadores.empty else 60
-            avg_loss = abs(perdedores['Resultado_USD'].mean()) if not perdedores.empty else 30
+        if not resumen_stats.empty:
+            fig_mc, ax_mc = plt.subplots(figsize=(16, 7))
+            all_paths = []
             
-            fig_mc, ax_mc = plt.subplots(figsize=(16, 8)) # Escala más grande
-            final_balances = []
-
             for _ in range(n_sim):
-                eventos = np.random.choice([avg_win, -avg_loss], size=total_trades, p=[win_rate/100, 1-win_rate/100])
-                # Aplicamos volatilidad a los eventos para realismo
-                ruido = np.random.normal(0, volatilidad, size=total_trades)
-                ruta = cap_inicial + np.cumsum(eventos + ruido)
-                final_balances.append(ruta[-1])
-                ax_mc.plot(ruta, color='royalblue', alpha=0.04, linewidth=1)
+                draws = np.random.choice(resumen_stats['Resultado_USD'], size=n_trades_future, replace=True)
+                path = 10000 + np.cumsum(draws)
+                all_paths.append(path)
+                ax_mc.plot(path, color='gray', alpha=0.03) # Caminos aleatorios en gris tenue
 
-            ax_mc.axhline(cap_inicial, color='red', linestyle='--', linewidth=2, label="Capital Inicial")
-            ax_mc.set_title(f"Simulación de {n_sim} rutas posibles basado en tu historia", fontsize=15)
-            ax_mc.set_xlabel("Número de Operaciones", fontsize=12)
-            ax_mc.set_ylabel("Balance de Cuenta (USD)", fontsize=12)
-            ax_mc.grid(True, alpha=0.3)
+            # Cálculo de la Mediana (P50)
+            median_path = np.median(all_paths, axis=0)
+            ax_mc.plot(median_path, color='gold', linewidth=3, label="Mediana Estadística (P50)")
+            ax_mc.axhline(10000, color='red', linestyle='--', label="Breakeven")
+            
+            ax_mc.set_title(f"Proyección de {n_trades_future} trades futuros (Basado en tu histórico)")
+            ax_mc.legend()
             st.pyplot(fig_mc)
-            
-            # Estadísticas debajo del gráfico
-            c_mc1, c_mc2, c_mc3 = st.columns(3)
-            c_mc1.write(f"**Esperanza de Ganancia:** ${np.mean(final_balances)-cap_inicial:,.2f}")
-            c_mc2.write(f"**Probabilidad de Éxito:** {(np.array(final_balances) > cap_inicial).mean()*100:.1f}%")
-            c_mc3.write(f"**Peor Escenario:** ${min(final_balances):,.2f}")
 
-        # --- 6. LISTADO DE TRADES (Ganadores y Perdedores) ---
+        # --- LISTADO DE TRADES DETALLADO ---
         st.write("---")
-        st.write("### 📜 Detalle de Operaciones")
+        st.write("### 📜 Detalle de Operaciones Cerradas")
         
-        cols_finales = ['Ticker', 'Fecha_In', 'Fecha_Out', 'Cant_Total', 'Precio_Entrada', 'Precio_Salida', 'Inversion_Inicial', 'Resultado_USD', 'Rendimiento_%']
+        # Formateo de fechas y redondeo solicitado
+        resumen_stats['Fecha_In'] = pd.to_datetime(resumen_stats['Fecha_In']).dt.date
+        resumen_stats['Fecha_Out'] = pd.to_datetime(resumen_stats['Fecha_Out']).dt.date
+        resumen_stats['Cant_Total'] = resumen_stats['Cant_Total'].round(4)
         
-        tab_gan, tab_per = st.tabs(["✅ Ganadores", "❌ Perdedores"])
+        cols_finales = ['Ticker', 'Fecha_In', 'Fecha_Out', 'Cant_Total', 'Precio_Entrada', 'Inversion_Inicial', 'Size_vs_10k_%', 'Resultado_USD', 'Rendimiento_%']
         
-        with tab_gan:
-            st.dataframe(ganadores[cols_finales].sort_values('Resultado_USD', ascending=False).style.format({
-                'Precio_Entrada': '{:.2f}', 'Precio_Salida': '{:.2f}',
-                'Inversion_Inicial': '${:,.2f}', 'Resultado_USD': '${:,.2f}', 'Rendimiento_%': '{:.2f}%'
-            }), use_container_width=True)
-            
-        with tab_per:
-            st.dataframe(perdedores[cols_finales].sort_values('Resultado_USD', ascending=True).style.format({
-                'Precio_Entrada': '{:.2f}', 'Precio_Salida': '{:.2f}',
-                'Inversion_Inicial': '${:,.2f}', 'Resultado_USD': '${:,.2f}', 'Rendimiento_%': '{:.2f}%'
-            }), use_container_width=True)
+        tab1, tab2 = st.tabs(["✅ Ganadores", "❌ Perdedores"])
+        fmt_config = {
+            'Inversion_Inicial': '${:,.2f}', 'Resultado_USD': '${:,.2f}', 
+            'Rendimiento_%': '{:.2f}%', 'Size_vs_10k_%': '{:.2f}%',
+            'Precio_Entrada': '{:.2f}', 'Cant_Total': '{:.4f}'
+        }
+        
+        with tab1:
+            st.dataframe(ganadores[cols_finales].style.format(fmt_config), use_container_width=True)
+        with tab2:
+            st.dataframe(perdedores[cols_finales].style.format(fmt_config), use_container_width=True)
 
     except Exception as e:
-        st.error(f"❌ Error en el procesamiento: {e}")
-        st.write("Columnas detectadas:", list(df_trades.columns))
+        st.error(f"⚠️ Hubo un problema procesando los datos: {e}")
