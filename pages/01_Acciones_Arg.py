@@ -3,8 +3,10 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import os
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Acciones Argentinas", layout="wide")
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="Portfolio Argentina Pro", layout="wide")
 
 @st.cache_data
 def cargar_datos_argentina():
@@ -18,19 +20,16 @@ def cargar_datos_argentina():
     
     mapeo = {
         'ticker': 'Ticker', 'operado': 'fecha', 'cantidad': 'Cantidad',
-        'precio': 'Precio', 'precio_usd': 'Precio_USD',
-        'inversion_usd': 'Inversion_USD', 'operacion': 'Operacion'
+        'precio_usd': 'Precio_USD', 'inversion_usd': 'Inversion_USD'
     }
     df = df.rename(columns={k: v for k, v in mapeo.items() if k in df.columns})
-    
-    if 'fecha' in df.columns:
-        df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
+    df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
     
     # --- PROCESAMIENTO ---
     df = df.sort_values(['Ticker', 'fecha'])
     df['Posicion_Acum'] = df.groupby('Ticker')['Cantidad'].cumsum()
 
-    # Limpieza de residuos para cerrar IRSA y FERR
+    # Limpieza de residuos (FERR/IRSA)
     df.loc[df['Posicion_Acum'].abs() < 1.0, 'Posicion_Acum'] = 0.0
     
     df['Es_Cierre'] = (df['Posicion_Acum'] == 0)
@@ -43,86 +42,98 @@ def cargar_datos_argentina():
     
     return df.merge(status, on=['Ticker', 'ID_Trade'])
 
-def obtener_precios_merval(tickers):
+def obtener_precios(tickers):
     if not tickers: return {}
-    tickers_yf = [f"{t}.BA" for t in tickers]
     try:
-        data = yf.download(tickers_yf, period="1d", progress=False)['Close']
-        precios = {}
-        for t in tickers:
-            col = f"{t}.BA"
-            if col in data.columns:
-                val = data[col].dropna()
-                if not val.empty: precios[t] = val.iloc[-1]
-            elif len(tickers) == 1:
-                precios[t] = data.iloc[-1]
-        return precios
-    except:
-        return {}
+        data = yf.download([f"{t}.BA" for t in tickers], period="1d", progress=False)['Close']
+        return {t: data[f"{t}.BA"].iloc[-1] if len(tickers)>1 else data.iloc[-1] for t in tickers}
+    except: return {}
 
-# --- INTERFAZ ---
-st.title("🇦🇷 Cartera de Acciones Argentinas")
+# --- LÓGICA DE LA APP ---
 df_arg = cargar_datos_argentina()
 
 if df_arg is not None:
     mep_hoy = st.sidebar.number_input("Cotización MEP", value=1433.21)
-
-    # --- POSICIONES ABIERTAS ---
-    st.subheader("🔵 Posiciones Actuales")
-    df_abiertos = df_arg[df_arg['Estado_Trade'] == 'Abierto'].copy()
     
-    if not df_abiertos.empty:
-        dict_precios = obtener_precios_merval(df_abiertos['Ticker'].unique().tolist())
-        
-        # Agrupamos para obtener el costo y la cantidad actual
-        resumen = df_abiertos.groupby(['Ticker', 'ID_Trade']).agg({
-            'Posicion_Acum': 'last',
-            'Inversion_USD': 'sum', # Este es el flujo neto (usualmente negativo si compraste)
-            'fecha': 'min'
-        }).reset_index()
-        
-        resumen['Precio_Actual_ARS'] = resumen['Ticker'].map(dict_precios)
-        
-        # --- LÓGICA DE CÁLCULO CORREGIDA ---
-        # 1. Valuación actual
-        resumen['Valuacion_USD'] = (resumen['Posicion_Acum'] * resumen['Precio_Actual_ARS']) / mep_hoy
-        
-        # 2. Inversión (Costo): La tratamos como positivo para la resta
-        # Si Inversion_USD es -100 (compra), el costo es 100.
-        resumen['Inversion_Costo_USD'] = resumen['Inversion_USD'].abs()
-        
-        # 3. Ganancia/Pérdida = Valuación - Inversión
-        resumen['Ganancia_USD'] = resumen['Valuacion_USD'] - resumen['Inversion_Costo_USD']
-        
-        # 4. Rendimiento %
-        resumen['Rend_%'] = (resumen['Ganancia_USD'] / resumen['Inversion_Costo_USD']) * 100
-        
-        # Reordenar y formatear columnas para que sea claro
-        cols_mostrar = ['Ticker', 'Posicion_Acum', 'Inversion_Costo_USD', 'Valuacion_USD', 'Ganancia_USD', 'Rend_%']
-        
-        st.dataframe(resumen[cols_mostrar].style.format({
-            'Posicion_Acum': '{:,.0f}', 
-            'Inversion_Costo_USD': 'US$ {:,.2f}',
-            'Valuacion_USD': 'US$ {:,.2f}', 
-            'Ganancia_USD': 'US$ {:,.2f}', 
-            'Rend_%': '{:.2f}%'
-        }).background_gradient(subset=['Rend_%'], cmap='RdYlGn', vmin=-15, vmax=15), use_container_width=True)
-    else:
-        st.info("No hay trades abiertos.")
-
-    # --- HISTORIAL ---
-    st.subheader("🟢 Historial de Trades Cerrados")
+    # 1. CÁLCULOS DE MÉTRICAS (PROCESAMIENTO)
     df_cerrados = df_arg[df_arg['Estado_Trade'] == 'Cerrado'].copy()
-    if not df_cerrados.empty:
-        resumen_c = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg({
-            'fecha': ['min', 'max'],
-            'Inversion_USD': 'sum'
+    resumen_c = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg(
+        Inversion_USD=('Inversion_USD', 'sum'),
+        Fecha_In=('fecha', 'min'),
+        Fecha_Out=('fecha', 'max')
+    ).reset_index()
+    
+    # Resultado real: lo que entró menos lo que salió
+    resumen_c['Resultado_USD'] = -resumen_c['Inversion_USD']
+    # Para el cálculo de % necesitamos el costo (suma de flujos negativos del trade)
+    costo_trade = df_cerrados[df_cerrados['Inversion_USD'] < 0].groupby(['Ticker', 'ID_Trade'])['Inversion_USD'].sum().abs()
+    resumen_c = resumen_c.merge(costo_trade.rename('Costo_Estimado'), on=['Ticker', 'ID_Trade'], how='left')
+    resumen_c['Rend_%'] = (resumen_c['Resultado_USD'] / resumen_c['Costo_Estimado']) * 100
+
+    ganadores = resumen_c[resumen_c['Resultado_USD'] > 0]
+    perdedores = resumen_c[resumen_c['Resultado_USD'] <= 0]
+
+    # --- MÉTRICAS ENCABEZADO ---
+    st.title("📊 Análisis de Performance Argentina")
+    
+    # Promedios Ponderados
+    w_avg_gain = (ganadores['Rend_%'] * ganadores['Costo_Estimado']).sum() / ganadores['Costo_Estimado'].sum() if not ganadores.empty else 0
+    w_avg_loss = (perdedores['Rend_%'] * perdedores['Costo_Estimado']).sum() / perdedores['Costo_Estimado'].sum() if not perdedores.empty else 0
+    avg_size_10k = (resumen_c['Costo_Estimado'].mean() / 10000) * 100
+    profit_factor = ganadores['Resultado_USD'].sum() / abs(perdedores['Resultado_USD'].sum()) if not perdedores.empty else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Prom. Pond. Ganancia", f"{w_avg_gain:.2f}%")
+    m2.metric("Prom. Pond. Pérdida", f"{w_avg_loss:.2f}%", delta_color="inverse")
+    m3.metric("Avg Size (s/10k)", f"{avg_size_10k:.2f}%")
+    m4.metric("Profit Factor", f"{profit_factor:.2f}x")
+
+    # --- GRÁFICOS ---
+    st.write("---")
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        # Torta Win Rate
+        fig_win, ax_win = plt.subplots(figsize=(5, 3))
+        ax_win.pie([len(ganadores), len(perdedores)], labels=['Wins', 'Losses'], 
+                   autopct='%1.1f%%', colors=['#2ecc71', '#e74c3c'], startangle=140)
+        ax_win.set_title("Efectividad (Win Rate)")
+        st.pyplot(fig_win)
+
+    # --- ABIERTOS & PARTICIPACIÓN ---
+    df_abiertos = df_arg[df_arg['Estado_Trade'] == 'Abierto'].copy()
+    if not df_abiertos.empty:
+        dict_precios = obtener_precios(df_abiertos['Ticker'].unique().tolist())
+        res_abierto = df_abiertos.groupby(['Ticker', 'ID_Trade']).agg({
+            'Posicion_Acum': 'last', 'Inversion_USD': 'sum'
         }).reset_index()
-        resumen_c.columns = ['Ticker', 'ID_Trade', 'Fecha_In', 'Fecha_Out', 'P&L_Final_USD']
+        res_abierto['Valuacion_USD'] = (res_abierto['Posicion_Acum'] * res_abierto['Ticker'].map(dict_precios)) / mep_hoy
         
-        # En cerrados, el flujo neto invertido es la ganancia (Venta + y Compra -)
-        resumen_c['P&L_Final_USD'] = -resumen_c['P&L_Final_USD'] 
+        with col_chart2:
+            # Torta Participación de Tenencia
+            fig_part, ax_part = plt.subplots(figsize=(5, 3))
+            ax_part.pie(res_abierto['Valuacion_USD'], labels=res_abierto['Ticker'], 
+                        autopct='%1.1f%%', startangle=140)
+            ax_part.set_title("Participación Tenencia Actual (USD)")
+            st.pyplot(fig_part)
+
+        st.subheader("🔵 Posiciones Actuales")
+        res_abierto['Ganancia_USD'] = res_abierto['Valuacion_USD'] + res_abierto['Inversion_USD']
+        res_abierto['Rend_%'] = (res_abierto['Ganancia_USD'] / res_abierto['Inversion_USD'].abs()) * 100
+        st.dataframe(res_abierto.style.format({'Valuacion_USD': 'US$ {:,.2f}', 'Ganancia_USD': 'US$ {:,.2f}', 'Rend_%': '{:.2f}%'}))
+
+    # --- TRADES CERRADOS (TABS Y COLORES) ---
+    st.write("---")
+    st.subheader("📜 Historial de Trades Cerrados")
+    
+    tab_win, tab_loss = st.tabs(["✅ Ganadores", "❌ Perdedores"])
+    
+    with tab_win:
+        st.dataframe(ganadores.sort_values('Resultado_USD', ascending=False).style.format({
+            'Resultado_USD': 'US$ {:,.2f}', 'Costo_Estimado': 'US$ {:,.2f}', 'Rend_%': '{:.2f}%'
+        }).background_gradient(subset=['Resultado_USD'], cmap='Greens'), use_container_width=True)
         
-        st.dataframe(resumen_c.sort_values('Fecha_Out', ascending=False).style.format({
-            'P&L_Final_USD': 'US$ {:,.2f}'
-        }).background_gradient(subset=['P&L_Final_USD'], cmap='RdYlGn'), use_container_width=True)
+    with tab_loss:
+        st.dataframe(perdedores.sort_values('Resultado_USD', ascending=True).style.format({
+            'Resultado_USD': 'US$ {:,.2f}', 'Costo_Estimado': 'US$ {:,.2f}', 'Rend_%': '{:.2f}%'
+        }).background_gradient(subset=['Resultado_USD'], cmap='Reds'), use_container_width=True)
