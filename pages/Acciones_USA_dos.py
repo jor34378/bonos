@@ -11,163 +11,171 @@ st.set_page_config(page_title="Performance USA", layout="wide")
 def cargar_datos_usa():
     nombre = 'reporte_trades_para_USA.csv'
     rutas = [nombre, os.path.join('..', nombre)]
-    archivo_encontrado = None
     for r in rutas:
         if os.path.exists(r):
-            archivo_encontrado = r
-            break
-
-    if archivo_encontrado:
-        df = pd.read_csv(archivo_encontrado, sep=';', encoding='utf-8-sig')
-        # NO invertimos nada aquí. Los datos entran como vienen:
-        # Ventas → Inversion_USA negativa (ingreso de dinero)
-        # Compras → Inversion_USA positiva (egreso de dinero)
-        return df
+            df = pd.read_csv(r, sep=';', encoding='utf-8-sig')
+            return df
     return None
 
 df_trades = cargar_datos_usa()
 
-if df_trades is not None:
-    st.title("🇺🇸 Análisis de Estrategia - Acciones USA")
+if df_trades is None:
+    st.error("❌ No se encontró 'reporte_trades_para_USA.csv'.")
+    st.stop()
 
-    # 1. Filtramos trades cerrados
-    df_cerrados = df_trades[df_trades['Estado_Trade'] == 'Cerrado'].copy()
+st.title("🇺🇸 Análisis de Estrategia - Acciones USA")
 
-    # 2. Agrupamos para calcular el PnL real de cada trade
-    # PnL = suma de Inversion_USA del trade completo.
-    # Ventas aportan negativo (ingresos), Compras aportan positivo (costos).
-    # PnL = ingresos - costos → si ganaste, el neto es NEGATIVO en el CSV.
-    # Por eso al final multiplicamos por -1 SOLO el resultado agrupado.
-    resumen_stats = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg(
-        PnL_raw=('Inversion_USA', 'sum'),
-        Cant_Total=('Cantidad_USA', lambda x: x[x > 0].sum()),
-        Precio_Entrada=('Precio_Unitario', 'first'),
-        Fecha_In=('fecha', 'min'),
-        Fecha_Out=('fecha', 'max')
-    ).reset_index()
+# ── 1. Solo cerrados ──────────────────────────────────────────────────────────
+df_cerrados = df_trades[df_trades['Estado_Trade'] == 'Cerrado'].copy()
 
-    # La inversión neta en el CSV es positiva cuando perdés y negativa cuando ganás.
-    # Invertimos solo aquí para tener semántica correcta: positivo = ganancia.
-    resumen_stats['Resultado_USD'] = resumen_stats['PnL_raw'] * -1
+if df_cerrados.empty:
+    st.warning("No hay trades cerrados en el archivo.")
+    st.stop()
 
-    # 3. Inversión inicial para calcular el rendimiento %
-    resumen_stats['Inversion_Inicial'] = resumen_stats['Cant_Total'] * resumen_stats['Precio_Entrada']
-    resumen_stats['Rendimiento_%'] = np.where(
-        resumen_stats['Inversion_Inicial'] > 0,
-        (resumen_stats['Resultado_USD'] / resumen_stats['Inversion_Inicial']) * 100,
-        0
+# ── 2. PnL por trade ──────────────────────────────────────────────────────────
+# Compra = +X (egreso), Venta = -X (ingreso)
+# PnL = -(sum) → positivo cuando ganaste
+resumen = (
+    df_cerrados
+    .groupby(['Ticker', 'ID_Trade'])
+    .agg(
+        PnL_raw        = ('Inversion_USA', 'sum'),
+        Cant_Total     = ('Cantidad_USA',  lambda x: x[x > 0].sum()),
+        Precio_Entrada = ('Precio_Unitario','first'),
+        Fecha_In       = ('fecha',         'min'),
+        Fecha_Out      = ('fecha',         'max'),
     )
+    .reset_index()
+)
 
-    # 4. Clasificación correcta
-    ganadores = resumen_stats[resumen_stats['Resultado_USD'] > 0].copy()
-    perdedores = resumen_stats[resumen_stats['Resultado_USD'] <= 0].copy()
+resumen['Resultado_USD']   = resumen['PnL_raw'] * -1
+resumen['Inversion_Inicial'] = resumen['Cant_Total'] * resumen['Precio_Entrada']
+resumen['Rendimiento_%']   = np.where(
+    resumen['Inversion_Inicial'] > 0,
+    (resumen['Resultado_USD'] / resumen['Inversion_Inicial']) * 100,
+    0
+)
 
-    total_trades = len(resumen_stats)
-    win_rate = (len(ganadores) / total_trades * 100) if total_trades > 0 else 0
-    ganancia_total = resumen_stats['Resultado_USD'].sum()
+# ── 3. Clasificación ──────────────────────────────────────────────────────────
+ganadores   = resumen[resumen['Resultado_USD'] > 0]
+perdedores  = resumen[resumen['Resultado_USD'] <= 0]
+total       = len(resumen)
+win_rate    = len(ganadores) / total * 100 if total > 0 else 0
+ganancia_total = resumen['Resultado_USD'].sum()
 
-    # --- MÉTRICAS ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Win Rate ✅", f"{win_rate:.1f}%")
-    c2.metric("Ganancia Total USD", f"$ {ganancia_total:,.2f}")
-    c3.metric("P&L Promedio por Trade", f"$ {resumen_stats['Resultado_USD'].mean():,.2f}")
-    c4.metric("Total Trades Cerrados", total_trades)
+# ── 4. DEBUG temporal (borralo cuando todo funcione) ──────────────────────────
+with st.expander("🔍 Debug — primeras filas del resumen"):
+    st.dataframe(resumen.head(10))
+    st.write(f"Ganadores: {len(ganadores)} | Perdedores: {len(perdedores)} | Total: {total}")
+    st.write(f"Resultado_USD — min: {resumen['Resultado_USD'].min():.2f}, max: {resumen['Resultado_USD'].max():.2f}")
 
-    st.divider()
+# ── 5. Métricas ───────────────────────────────────────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Win Rate ✅",            f"{win_rate:.1f}%")
+c2.metric("Ganancia Total USD",     f"$ {ganancia_total:,.2f}")
+c3.metric("P&L Promedio por Trade", f"$ {resumen['Resultado_USD'].mean():,.2f}")
+c4.metric("Total Trades Cerrados",  total)
 
-    # --- GRÁFICOS ---
-    col_left, col_right = st.columns(2)
+st.divider()
 
-    with col_left:
-        st.subheader("Efectividad")
-        fig_pie = px.pie(
-            names=['Ganadores', 'Perdedores'],
-            values=[len(ganadores), len(perdedores)],
-            color_discrete_sequence=['#2ecc71', '#e74c3c'],
-            hole=0.4
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
+# ── 6. Gráficos ───────────────────────────────────────────────────────────────
+col_left, col_right = st.columns(2)
 
-    with col_right:
-        st.subheader("Distribución de PnL (USD)")
-        fig_hist = px.histogram(
-            resumen_stats, x="Resultado_USD",
-            nbins=20, color_discrete_sequence=['#3498db'],
-            labels={"Resultado_USD": "Resultado USD"}
-        )
-        fig_hist.add_vline(x=0, line_dash="dash", line_color="red",
-                           annotation_text="Break even", annotation_position="top right")
-        fig_hist.update_layout(template="plotly_dark")
-        st.plotly_chart(fig_hist, use_container_width=True)
+with col_left:
+    st.subheader("Efectividad")
+    fig_pie = go.Figure(go.Pie(
+        labels = ['Ganadores', 'Perdedores'],
+        values = [len(ganadores), len(perdedores)],
+        hole   = 0.4,
+        marker_colors = ['#2ecc71', '#e74c3c'],
+    ))
+    fig_pie.update_layout(margin=dict(t=20, b=20))
+    st.plotly_chart(fig_pie, use_container_width=True)
 
-    # --- SIMULACIÓN MONTE CARLO ---
-    st.subheader("🎲 Simulación de Proyección (Próximos 107 Trades)")
-
-    if not ganadores.empty and not perdedores.empty:
-        capital_inicial = 6000
-        g_media = ganadores['Resultado_USD'].mean()
-        p_media = abs(perdedores['Resultado_USD'].mean())
-        prob_ganar = win_rate / 100
-        prob_perder = 1 - prob_ganar
-
-        simulaciones = 50
-        n_trades = 107
-        resultados_finales = []
-
-        fig_mc = go.Figure()
-        for _ in range(simulaciones):
-            pasos = np.random.choice(
-                [g_media, -p_media],
-                size=n_trades,
-                p=[prob_ganar, prob_perder]
-            )
-            trayectoria = capital_inicial + np.cumsum(pasos)
-            resultados_finales.append(trayectoria[-1])
-            fig_mc.add_trace(go.Scatter(
-                y=trayectoria, mode='lines',
-                line=dict(width=1),
-                opacity=0.3,
-                showlegend=False
-            ))
-
-        fig_mc.add_hline(y=capital_inicial, line_dash="dash", line_color="white",
-                         annotation_text=f"Capital inicial ${capital_inicial:,}")
-        fig_mc.update_layout(
-            height=450,
-            template="plotly_dark",
-            yaxis_title="Capital USD",
-            xaxis_title="Nro. de Trade"
-        )
-        st.plotly_chart(fig_mc, use_container_width=True)
-
-        # Métricas Monte Carlo
-        percentil_10 = np.percentile(resultados_finales, 10)
-        percentil_90 = np.percentile(resultados_finales, 90)
-        media_final = np.mean(resultados_finales)
-
-        mc1, mc2, mc3 = st.columns(3)
-        mc1.metric("Escenario Pesimista (P10)", f"$ {percentil_10:,.2f}")
-        mc2.metric("Capital Esperado (Media)", f"$ {media_final:,.2f}")
-        mc3.metric("Escenario Optimista (P90)", f"$ {percentil_90:,.2f}")
-
-        st.info(f"Basado en {total_trades} trades históricos | Ganancia media: ${g_media:.2f} | Pérdida media: ${p_media:.2f} | Win Rate: {win_rate:.1f}%")
-    else:
-        st.warning("No hay suficientes datos de ganadores y perdedores para simular.")
-
-    # --- REGISTRO DE OPERACIONES ---
-    st.subheader("📋 Detalle de Trades (Ordenados por Resultado)")
-    st.dataframe(
-        resumen_stats[['Ticker', 'ID_Trade', 'Fecha_In', 'Fecha_Out',
-                        'Cant_Total', 'Precio_Entrada', 'Inversion_Inicial',
-                        'Resultado_USD', 'Rendimiento_%']]
-        .sort_values('Resultado_USD', ascending=False)
-        .style.format({
-            'Inversion_Inicial': '${:,.2f}',
-            'Resultado_USD': '${:,.2f}',
-            'Rendimiento_%': '{:.2f}%',
-            'Precio_Entrada': '{:.2f}'
-        }).background_gradient(subset=['Resultado_USD'], cmap='RdYlGn'),
-        use_container_width=True
+with col_right:
+    st.subheader("Distribución de PnL (USD)")
+    fig_hist = go.Figure(go.Histogram(
+        x      = resumen['Resultado_USD'],
+        nbinsx = 20,
+        marker_color = '#3498db',
+    ))
+    fig_hist.add_vline(x=0, line_dash="dash", line_color="red")
+    fig_hist.update_layout(
+        xaxis_title = "Resultado USD",
+        yaxis_title = "Frecuencia",
+        margin      = dict(t=20, b=40),
     )
+    st.plotly_chart(fig_hist, use_container_width=True)
+
+# ── 7. Monte Carlo ────────────────────────────────────────────────────────────
+st.subheader("🎲 Simulación de Proyección (Próximos 107 Trades)")
+
+if not ganadores.empty and not perdedores.empty:
+    capital_inicial = 6000
+    g_media  = float(ganadores['Resultado_USD'].mean())
+    p_media  = float(abs(perdedores['Resultado_USD'].mean()))
+    prob_win = win_rate / 100
+
+    resultados_finales = []
+    fig_mc = go.Figure()
+
+    for _ in range(50):
+        pasos = np.random.choice(
+            [g_media, -p_media],
+            size = 107,
+            p    = [prob_win, 1 - prob_win]
+        )
+        trayectoria = capital_inicial + np.cumsum(pasos)
+        resultados_finales.append(float(trayectoria[-1]))
+        fig_mc.add_trace(go.Scatter(
+            y          = trayectoria.tolist(),
+            mode       = 'lines',
+            line       = dict(width=1),
+            opacity    = 0.3,
+            showlegend = False,
+        ))
+
+    fig_mc.add_hline(
+        y                   = capital_inicial,
+        line_dash           = "dash",
+        line_color          = "gray",
+        annotation_text     = f"Capital inicial ${capital_inicial:,}",
+        annotation_position = "bottom right",
+    )
+    fig_mc.update_layout(
+        height      = 400,
+        yaxis_title = "Capital USD",
+        xaxis_title = "Nro. de Trade",
+        margin      = dict(t=20, b=40),
+    )
+    st.plotly_chart(fig_mc, use_container_width=True)
+
+    p10  = np.percentile(resultados_finales, 10)
+    p90  = np.percentile(resultados_finales, 90)
+    med  = np.mean(resultados_finales)
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Escenario Pesimista (P10)",  f"$ {p10:,.2f}")
+    mc2.metric("Capital Esperado (Media)",    f"$ {med:,.2f}")
+    mc3.metric("Escenario Optimista (P90)",   f"$ {p90:,.2f}")
+    st.info(f"Win Rate: {win_rate:.1f}% | Ganancia media: ${g_media:.2f} | Pérdida media: ${p_media:.2f}")
 else:
-    st.error("❌ No se encontró el archivo 'reporte_trades_para_USA.csv'. Asegurate de que esté en la misma carpeta que este script.")
+    st.warning("No hay suficientes datos para simular. Revisá el debug arriba.")
+
+# ── 8. Tabla de trades ────────────────────────────────────────────────────────
+st.subheader("📋 Detalle de Trades")
+cols_vista = ['Ticker','ID_Trade','Fecha_In','Fecha_Out',
+              'Cant_Total','Precio_Entrada','Inversion_Inicial',
+              'Resultado_USD','Rendimiento_%']
+
+st.dataframe(
+    resumen[cols_vista]
+    .sort_values('Resultado_USD', ascending=False)
+    .style.format({
+        'Inversion_Inicial': '${:,.2f}',
+        'Resultado_USD':     '${:,.2f}',
+        'Rendimiento_%':     '{:.2f}%',
+        'Precio_Entrada':    '{:.2f}',
+    })
+    .background_gradient(subset=['Resultado_USD'], cmap='RdYlGn'),
+    use_container_width=True,
+)
