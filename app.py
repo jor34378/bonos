@@ -20,8 +20,6 @@ def cargar_datos():
         nombre_base = os.path.basename(ruta)
         ticker = nombre_base.split('_')[1].split('.')[0]
         df_temp = pd.read_csv(ruta, sep=None, engine='python', encoding='latin-1', dtype=str)
-        
-        # Limpieza de nombres de columnas (BOM de Excel)
         df_temp.columns = [str(col).strip().replace('ï»¿', '') for col in df_temp.columns]
         
         for col in ['Cantidad', 'Precio', 'Importe']:
@@ -44,12 +42,10 @@ def cargar_datos():
         df_mep = df_mep[["fecha", "cierre"]].rename(columns={"cierre": "Cotiz_mep", "fecha": "Operado"})
         df_mep = df_mep.dropna(subset=['Operado']).sort_values('Operado')
     else:
-        # Fallback si no hay MEP
         df_mep = pd.DataFrame({'Operado': [pd.Timestamp.now().normalize()], 'Cotiz_mep': [1300.0]})
 
     # 3. Carga de Maestro
     archivos_maestro = [f for f in glob.glob('listado_ticker_bonos*.csv') if not os.path.basename(f).startswith('~$')]
-    
     if not archivos_maestro:
         df_maestro = pd.DataFrame(columns=['Ticker', 'Tipo'])
     else:
@@ -80,28 +76,36 @@ def procesar_cartera(df_mov, df_mep, df_maestro, precios_manuales):
     resumen = []
     for (tipo, ticker), group in df_limpio.groupby(['Tipo', 'Ticker']):
         c_neta, c_nom, tot_ars_c, tot_usd_c = 0, 0, 0, 0
+        v_nom, tot_ars_v, tot_usd_v = 0, 0, 0
         
         for _, row in group.iterrows():
-            if abs(c_neta) < 0.1:
+            if abs(c_neta) < 0.1: # Reseteo de ciclo si el trade se cerró
                 c_nom, tot_ars_c, tot_usd_c = 0, 0, 0
+                v_nom, tot_ars_v, tot_usd_v = 0, 0, 0
+            
             cant = row['Cantidad']
-            if cant > 0:
+            if cant > 0: # Compra
                 c_neta += cant; c_nom += cant
                 tot_ars_c += row['Importe_ARS']; tot_usd_c += row['Importe_USD']
-            else:
-                c_neta += cant
+            else: # Venta
+                c_neta += cant; v_nom += abs(cant)
+                tot_ars_v += row['Importe_ARS']; tot_usd_v += row['Importe_USD']
 
         estado = "Abierto" if abs(c_neta) > 0.5 else "Cerrado"
-        ppp_ars = (tot_ars_c / c_nom * 100) if c_nom > 0 else 0
-        ppp_usd = (tot_usd_c / c_nom * 100) if c_nom > 0 else 0
+        ppp_usd_compra = (tot_usd_c / c_nom * 100) if c_nom > 0 else 0
         
-        # Uso del precio manual del sidebar
-        p_exit_usd = precios_manuales.get(ticker, ppp_usd)
+        # --- LÓGICA DE PRECIO DE SALIDA DIFERENCIADA ---
+        if estado == "Abierto":
+            # Si está abierto, manda el PRECIO MANUAL del sidebar. Si es 0, usa el PPP de compra.
+            p_exit_usd = precios_manuales.get(ticker, ppp_usd_compra)
+        else:
+            # Si está cerrado, usa el PRECIO REAL de venta de los movimientos
+            p_exit_usd = (tot_usd_v / v_nom * 100) if v_nom > 0 else 0
 
         resumen.append({
             'Ticker': ticker, 'Tipo': tipo, 'Cant_Final': round(c_neta, 0),
-            'PPP_USD': ppp_usd, 'P_Exit_USD': p_exit_usd, 
-            'Rinde_USD_%': ((p_exit_usd / ppp_usd) - 1) * 100 if ppp_usd > 0 else 0,
+            'PPP_USD': ppp_usd_compra, 'P_Exit_USD': p_exit_usd, 
+            'Rinde_USD_%': ((p_exit_usd / ppp_usd_compra) - 1) * 100 if ppp_usd_compra > 0 else 0,
             'Estado': estado
         })
     return pd.DataFrame(resumen), MEP_HOY
@@ -111,10 +115,10 @@ try:
     df_mov, df_mep, df_maestro = cargar_datos()
 
     if df_mov is not None:
-        # SIDEBAR EDITOR
-        st.sidebar.header("⚙️ Precios de Salida (USD)")
-        tickers_abiertos = df_mov['Ticker'].unique()
-        df_p_init = pd.DataFrame({'Ticker': sorted(tickers_abiertos), 'Precio_USD': 0.0})
+        # SIDEBAR: Solo para trades ABIERTOS
+        st.sidebar.header("⚙️ Precios Salida (Trades Abiertos)")
+        tickers_unicos = sorted(df_mov['Ticker'].unique())
+        df_p_init = pd.DataFrame({'Ticker': tickers_unicos, 'Precio_USD': 0.0})
         
         df_editado = st.sidebar.data_editor(
             df_p_init, 
@@ -128,7 +132,7 @@ try:
         st.title("📈 Mi Portafolio de Inversiones")
         st.metric("Cotización MEP Hoy", f"${mep_val:,.2f}")
 
-        estado_filtro = st.multiselect("Estado", ["Abierto", "Cerrado"], default=["Abierto"])
+        estado_filtro = st.multiselect("Estado de los Trades", ["Abierto", "Cerrado"], default=["Abierto"])
         df_f = df_res[df_res['Estado'].isin(estado_filtro)]
 
         for cat in df_f['Tipo'].unique():
@@ -137,8 +141,6 @@ try:
                     'Cant_Final': '{:,.0f}', 'PPP_USD': 'U$S {:,.2f}', 
                     'P_Exit_USD': 'U$S {:,.2f}', 'Rinde_USD_%': '{:.2f}%'
                 }).background_gradient(subset=['Rinde_USD_%'], cmap='RdYlGn', vmin=-10, vmax=10), use_container_width=True)
-    else:
-        st.warning("No se detectaron archivos de movimientos en la carpeta.")
 
 except Exception as e:
-    st.error(f"Error crítico: {e}")
+    st.error(f"Error: {e}")
