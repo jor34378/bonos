@@ -10,19 +10,38 @@ st.set_page_config(page_title="Performance Avanzada - USA", layout="wide")
 @st.cache_data
 def load_data():
     try:
+        # Cargamos detectando separador automáticamente
         df = pd.read_csv('reporte_trades_para_USA.csv', sep=None, engine='python')
-        df.columns = [str(c).strip().lower() for c in df.columns]
         
-        mapeo = {
-            'ticker': 'Ticker', 'inversion_usa': 'Inversion_USA',
-            'estado_trade': 'Estado_Trade', 'fecha': 'fecha',
-            'cantidad_usa': 'Cantidad_USA', 'precio_unitario': 'Precio_Unitario',
-            'id_trade': 'ID_Trade'
-        }
-        df = df.rename(columns={k: v for k, v in mapeo.items() if k in df.columns})
+        # Limpieza de encabezados: quitamos espacios pero MANTENEMOS nombres clave para el mapeo
+        df.columns = [str(c).strip() for c in df.columns]
         
+        # Mapeo de normalización (Buscamos el nombre sin importar mayúsculas)
+        # Esto previene el error de 'fecha' y 'estado_trade'
+        cols_map = {c.lower(): c for c in df.columns}
+        
+        def get_col(target):
+            return cols_map.get(target.lower())
+
+        # Renombramos a nombres estándar para el resto del script
+        rename_dict = {}
+        for oficial in ['Ticker', 'Inversion_USA', 'Estado_Trade', 'fecha', 'Cantidad_USA', 'Precio_Unitario', 'ID_Trade']:
+            col_real = get_col(oficial)
+            if col_real:
+                rename_dict[col_real] = oficial
+        
+        df = df.rename(columns=rename_dict)
+
+        # Procesamiento de fecha con fallback
         if 'fecha' in df.columns:
             df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
+        else:
+            # Si no se llama 'fecha', buscamos columnas que contengan 'fec' o 'dat'
+            cols_fec = [c for c in df.columns if 'fec' in c.lower() or 'dat' in c.lower()]
+            if cols_fec:
+                df = df.rename(columns={cols_fec[0]: 'fecha'})
+                df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
+        
         return df
     except Exception as e:
         st.error(f"❌ Error crítico al leer el CSV: {e}")
@@ -34,12 +53,14 @@ df_trades = load_data()
 
 if df_trades is not None:
     try:
-        # --- 2. PROCESAMIENTO ---
-        # Separamos Abiertos y Cerrados
+        # --- 2. SEPARACIÓN DE DATOS ---
+        # Normalizamos la columna estado para filtrar sin errores de case
+        df_trades['Estado_Trade'] = df_trades['Estado_Trade'].astype(str).str.strip().str.capitalize()
+        
         df_abiertos = df_trades[df_trades['Estado_Trade'] == 'Abierto'].copy()
         df_cerrados = df_trades[(df_trades['Estado_Trade'] == 'Cerrado') & (df_trades['fecha'].notnull())].copy()
 
-        # Estadísticas de Cerrados
+        # Agrupamos Cerrados para Estadísticas
         resumen_stats = df_cerrados.groupby(['Ticker', 'ID_Trade']).agg(
             Fecha_In=('fecha', 'min'),
             Fecha_Out=('fecha', 'max'),
@@ -54,42 +75,41 @@ if df_trades is not None:
                                                 (resumen_stats['Resultado_USD'] / resumen_stats['Inversion_Inicial']) * 100, 0)
         resumen_stats['Size_vs_10k_%'] = (resumen_stats['Inversion_Inicial'] / 10000) * 100
 
-        ganadores = resumen_stats[resumen_stats['Resultado_USD'] > 0]
-        perdedores = resumen_stats[resumen_stats['Resultado_USD'] <= 0]
+        ganadores = resumen_stats[resumen_stats['Resultado_USD'] > 0].copy()
+        perdedores = resumen_stats[resumen_stats['Resultado_USD'] <= 0].copy()
 
-        # --- 3. MÉTRICAS PONDERADAS (ENCABEZADO REORGANIZADO) ---
-        def ponderado(df):
-            if df.empty or df['Inversion_Inicial'].sum() == 0: return 0
-            return (df['Rendimiento_%'] * df['Inversion_Inicial']).sum() / df['Inversion_Inicial'].sum()
-
+        # --- 3. MÉTRICAS (CON WIN RATE %) ---
         st.subheader("📌 Análisis de Gestión y Riesgo")
         m1, m2, m3, m4, m5 = st.columns(5)
         
         win_rate = (len(ganadores) / len(resumen_stats) * 100) if not resumen_stats.empty else 0
-        
-        m1.metric("Win Rate", f"{win_rate:.1f}%")
+        m1.metric("Win Rate %", f"{win_rate:.1f}%")
+
+        def ponderado(df):
+            if df.empty or df['Inversion_Inicial'].sum() == 0: return 0
+            return (df['Rendimiento_%'] * df['Inversion_Inicial']).sum() / df['Inversion_Inicial'].sum()
+
         m2.metric("Prom. Pond. Ganancia", f"{ponderado(ganadores):.2f}%")
         m3.metric("Prom. Pond. Pérdida", f"{ponderado(perdedores):.2f}%")
-        m4.metric("Avg Size (s/10k)", f"{resumen_stats['Size_vs_10k_%'].mean():.2f}%")
+        m4.metric("Avg Trade Size (s/10k)", f"{resumen_stats['Size_vs_10k_%'].mean():.2f}%")
         
         p_factor = ganadores['Resultado_USD'].sum() / abs(perdedores['Resultado_USD'].sum()) if not perdedores.empty else 0
         m5.metric("Profit Factor", f"{p_factor:.2f}x")
 
-        # --- 4. TRADES ABIERTOS (NUEVA SECCIÓN PRIORITARIA) ---
+        # --- 4. LISTADO DE ACCIONES ABIERTAS (DATAFRAME COMPLETO) ---
         st.write("---")
-        st.subheader("📊 Monitoreo de Posiciones Abiertas")
+        st.subheader("📂 Posiciones Actuales (Abiertas)")
         if not df_abiertos.empty:
-            # Agrupamos para ver posición actual por Ticker
-            portfolio_viva = df_abiertos.groupby('Ticker').agg({
-                'Cantidad_USA': 'sum',
-                'Inversion_USA': 'sum' # Asumiendo que esto refleja el costo actual
-            }).reset_index()
-            portfolio_viva = portfolio_viva[portfolio_viva['Cantidad_USA'] > 0]
-            st.dataframe(portfolio_viva.style.format({'Inversion_USA': '${:,.2f}', 'Cantidad_USA': '{:.4f}'}), use_container_width=True)
+            # Mostramos el detalle completo de los abiertos
+            st.dataframe(df_abiertos.style.format({
+                'Inversion_USA': '${:,.2f}', 
+                'Cantidad_USA': '{:.4f}', 
+                'Precio_Unitario': '${:,.2f}'
+            }), use_container_width=True)
         else:
-            st.info("No hay posiciones abiertas actualmente.")
+            st.info("No hay trades abiertos actualmente.")
 
-        # --- 5. CUADRANTE SIMÉTRICO (GRÁFICOS 2x2) ---
+        # --- 5. CUADRANTE SIMÉTRICO (2x2) ---
         st.write("---")
         fig_size = (8, 5)
         col_f1_1, col_f1_2 = st.columns(2)
@@ -102,12 +122,13 @@ if df_trades is not None:
             st.pyplot(fig1)
 
         with col_f1_2:
-            # GRÁFICO DE TORTA: PESO DE LA INVERSIÓN (ABIERTOS)
+            # TORTA: PESO DE LA INVERSIÓN POR ACCIÓN ABIERTA
             fig2, ax2 = plt.subplots(figsize=fig_size)
             if not df_abiertos.empty:
-                pie_data = df_abiertos.groupby('Ticker')['Inversion_USA'].sum().abs()
-                ax2.pie(pie_data, labels=pie_data.index, autopct='%1.1f%%', startangle=140, colors=sns.color_palette("viridis", len(pie_data)))
-                ax2.set_title("Distribución de Capital (Posiciones Abiertas)")
+                # Agrupamos por ticker para ver el peso total por acción
+                pesos = df_abiertos.groupby('Ticker')['Inversion_USA'].sum().abs()
+                ax2.pie(pesos, labels=pesos.index, autopct='%1.1f%%', startangle=140, colors=sns.color_palette("viridis"))
+                ax2.set_title("Distribución de Capital (Abiertos)")
             else:
                 ax2.text(0.5, 0.5, "Sin datos abiertos", ha='center')
             st.pyplot(fig2)
@@ -143,14 +164,16 @@ if df_trades is not None:
             ax_mc.plot(path, color='gray', alpha=0.03)
         
         median_p50 = np.median(all_paths, axis=0)
-        ax_mc.plot(median_p50, color='gold', lw=4, label="Mediana P50 (Camino más probable)")
-        ax_mc.axhline(10000, color='red', ls='--', label="Breakeven (10k)")
+        ax_mc.plot(median_p50, color='gold', lw=4, label="Mediana P50")
+        ax_mc.axhline(10000, color='red', ls='--')
         ax_mc.legend()
         st.pyplot(fig_mc)
 
-        # --- 7. LISTADO DETALLADO (TABS) ---
+        # --- 7. HOJAS DE DETALLE (ABIERTOS Y CERRADOS) ---
         st.write("---")
-        st.subheader("📜 Historial Detallado de Operaciones")
+        st.subheader("📜 Listado Detallado de Operaciones")
+        
+        # Preparación de datos para visualización
         df_disp = resumen_stats.copy()
         df_disp['Fecha_In'] = df_disp['Fecha_In'].dt.date
         df_disp['Fecha_Out'] = df_disp['Fecha_Out'].dt.date
@@ -162,10 +185,15 @@ if df_trades is not None:
         }
         cols_tab = ['Ticker', 'Fecha_In', 'Fecha_Out', 'Cant_Total', 'Precio_Entrada', 'Inversion_Inicial', 'Size_vs_10k_%', 'Resultado_USD', 'Rendimiento_%']
         
-        t1, t2 = st.tabs(["✅ Cerrados Ganadores", "❌ Cerrados Perdedores"])
-        with t1:
+        tab_ab, tab_gan, tab_per = st.tabs(["📂 Abiertos", "✅ Ganadores", "❌ Perdedores"])
+        
+        with tab_ab:
+            st.dataframe(df_abiertos, use_container_width=True)
+            
+        with tab_gan:
             st.dataframe(df_disp[df_disp['Resultado_USD'] > 0].sort_values('Resultado_USD', ascending=False)[cols_tab].style.format(fmt), use_container_width=True)
-        with t2:
+            
+        with tab_per:
             st.dataframe(df_disp[df_disp['Resultado_USD'] <= 0].sort_values('Resultado_USD', ascending=True)[cols_tab].style.format(fmt), use_container_width=True)
 
     except Exception as e:
